@@ -14,10 +14,18 @@ class RedisService {
   async connect() {
     try {
       // Create Redis client with configuration
-      this.client = redis.createClient({
+      if (config.redis.url) {
+        this.client = redis.createClient({
+          url: config.redis.url
+        });
+      } else {
+        this.client = redis.createClient({
         host: config.redis.host,
         port: config.redis.port,
         password: config.redis.password,
+          db: config.redis.db
+        });
+      }
         db: config.redis.db,
         retryDelayOnFailover: 100,
         enableReadyCheck: true,
