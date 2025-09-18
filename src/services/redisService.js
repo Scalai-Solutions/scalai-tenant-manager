@@ -15,39 +15,40 @@ class RedisService {
     try {
       // Create Redis client with configuration
       if (config.redis.url) {
+        // Use REDIS_URL directly if available
         this.client = redis.createClient({
           url: config.redis.url
         });
       } else {
+        // Fall back to individual host/port/password
         this.client = redis.createClient({
-        host: config.redis.host,
-        port: config.redis.port,
-        password: config.redis.password,
-          db: config.redis.db
+          host: config.redis.host,
+          port: config.redis.port,
+          password: config.redis.password,
+          db: config.redis.db,
+          retryDelayOnFailover: 100,
+          enableReadyCheck: true,
+          maxRetriesPerRequest: 3,
+          lazyConnect: true,
+          keepAlive: true,
+          family: 4
         });
       }
-        db: config.redis.db,
-        retryDelayOnFailover: 100,
-        enableReadyCheck: true,
-        maxRetriesPerRequest: 3,
-        lazyConnect: true,
-        keepAlive: true,
-        family: 4
-      });
 
-      // Event handlers
+      // Set up event handlers
       this.client.on('connect', () => {
-        Logger.info('Redis client connecting...');
-      });
-
-      this.client.on('ready', () => {
-        Logger.info('Redis client connected and ready');
+        Logger.info('Redis client connected');
         this.isConnected = true;
         this.reconnectAttempts = 0;
       });
 
-      this.client.on('error', (error) => {
-        Logger.error('Redis client error:', { error: error.message });
+      this.client.on('ready', () => {
+        Logger.info('Redis client ready');
+        this.isConnected = true;
+      });
+
+      this.client.on('error', (err) => {
+        Logger.error('Redis client error:', err);
         this.isConnected = false;
       });
 
@@ -57,146 +58,120 @@ class RedisService {
       });
 
       this.client.on('reconnecting', () => {
+        Logger.info('Redis client reconnecting...');
         this.reconnectAttempts++;
-        Logger.info(`Redis client reconnecting... (attempt ${this.reconnectAttempts})`);
-        
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          Logger.error('Max reconnection attempts reached, giving up');
-          this.client.disconnect();
-        }
       });
 
       // Connect to Redis
       await this.client.connect();
       
       // Test connection
-      await this.ping();
+      await this.client.ping();
+      Logger.info('Redis connection established successfully');
       
-      Logger.info('Redis service initialized successfully');
-      return true;
     } catch (error) {
-      Logger.error('Failed to connect to Redis:', { error: error.message });
+      Logger.error('Failed to connect to Redis:', error);
       this.isConnected = false;
-      throw error;
+      
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.reconnectAttempts++;
+        Logger.info(`Retrying Redis connection in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        setTimeout(() => this.connect(), this.reconnectDelay);
+      } else {
+        Logger.error('Max reconnection attempts reached, giving up');
+      }
     }
   }
 
   async disconnect() {
-    try {
-      if (this.client && this.isConnected) {
-        await this.client.disconnect();
-        Logger.info('Redis client disconnected');
-      }
-    } catch (error) {
-      Logger.error('Error disconnecting Redis client:', { error: error.message });
+    if (this.client && this.isConnected) {
+      await this.client.quit();
+      this.isConnected = false;
+      Logger.info('Redis client disconnected');
     }
   }
 
-  async ping() {
-    try {
-      const result = await this.client.ping();
-      return result === 'PONG';
-    } catch (error) {
-      Logger.error('Redis ping failed:', { error: error.message });
-      return false;
+  async set(key, value, ttl = null) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
     }
-  }
-
-  // Generic cache methods
-  async set(key, value, ttlSeconds = config.redis.ttl) {
+    
     try {
-      if (!this.isConnected) {
-        Logger.warn('Redis not connected, skipping cache set');
-        return false;
-      }
-
-      const serializedValue = JSON.stringify(value);
-      if (ttlSeconds) {
-        await this.client.setEx(key, ttlSeconds, serializedValue);
+      if (ttl) {
+        await this.client.setEx(key, ttl, JSON.stringify(value));
       } else {
-        await this.client.set(key, serializedValue);
+        await this.client.set(key, JSON.stringify(value));
       }
-      
-      Logger.debug('Cache set successful:', { key, ttl: ttlSeconds });
       return true;
     } catch (error) {
-      Logger.error('Cache set failed:', { key, error: error.message });
-      return false;
+      Logger.error('Redis set error:', error);
+      throw error;
     }
   }
 
   async get(key) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
     try {
-      if (!this.isConnected) {
-        Logger.warn('Redis not connected, cache miss');
-        return null;
-      }
-
       const value = await this.client.get(key);
-      if (value === null) {
-        Logger.debug('Cache miss:', { key });
-        return null;
-      }
-
-      const parsedValue = JSON.parse(value);
-      Logger.debug('Cache hit:', { key });
-      return parsedValue;
+      return value ? JSON.parse(value) : null;
     } catch (error) {
-      Logger.error('Cache get failed:', { key, error: error.message });
-      return null;
+      Logger.error('Redis get error:', error);
+      throw error;
     }
   }
 
   async del(key) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
     try {
-      if (!this.isConnected) {
-        return false;
-      }
-
-      const result = await this.client.del(key);
-      Logger.debug('Cache delete:', { key, deleted: result > 0 });
-      return result > 0;
+      await this.client.del(key);
+      return true;
     } catch (error) {
-      Logger.error('Cache delete failed:', { key, error: error.message });
-      return false;
+      Logger.error('Redis del error:', error);
+      throw error;
     }
   }
 
   async exists(key) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
     try {
-      if (!this.isConnected) {
-        return false;
-      }
-
       const result = await this.client.exists(key);
       return result === 1;
     } catch (error) {
-      Logger.error('Cache exists check failed:', { key, error: error.message });
-      return false;
+      Logger.error('Redis exists error:', error);
+      throw error;
     }
   }
 
-  async expire(key, ttlSeconds) {
+  async expire(key, seconds) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
     try {
-      if (!this.isConnected) {
-        return false;
-      }
-
-      const result = await this.client.expire(key, ttlSeconds);
-      return result === 1;
+      await this.client.expire(key, seconds);
+      return true;
     } catch (error) {
-      Logger.error('Cache expire failed:', { key, error: error.message });
-      return false;
+      Logger.error('Redis expire error:', error);
+      throw error;
     }
   }
 
-  // Subaccount-specific cache methods
-  async cacheSubaccount(subaccountId, subaccountData, ttlSeconds = 3600) {
+  // Cache specific methods
+  async cacheSubaccount(subaccountId, data, ttl = 3600) {
     const key = `${config.redis.prefixes.subaccount}${subaccountId}`;
-    return await this.set(key, subaccountData, ttlSeconds);
+    return await this.set(key, data, ttl);
   }
 
-  async getSubaccount(subaccountId) {
+  async getCachedSubaccount(subaccountId) {
     const key = `${config.redis.prefixes.subaccount}${subaccountId}`;
     return await this.get(key);
   }
@@ -206,13 +181,12 @@ class RedisService {
     return await this.del(key);
   }
 
-  // User-subaccount relationship cache methods
-  async cacheUserSubaccounts(userId, subaccounts, ttlSeconds = 1800) {
+  async cacheUserSubaccounts(userId, data, ttl = 3600) {
     const key = `${config.redis.prefixes.userSubaccount}${userId}`;
-    return await this.set(key, subaccounts, ttlSeconds);
+    return await this.set(key, data, ttl);
   }
 
-  async getUserSubaccounts(userId) {
+  async getCachedUserSubaccounts(userId) {
     const key = `${config.redis.prefixes.userSubaccount}${userId}`;
     return await this.get(key);
   }
@@ -222,198 +196,35 @@ class RedisService {
     return await this.del(key);
   }
 
-  // Permission cache methods
-  async cachePermissions(userId, subaccountId, permissions, ttlSeconds = 3600) {
-    const key = `${config.redis.prefixes.permissions}${userId}:${subaccountId}`;
-    return await this.set(key, permissions, ttlSeconds);
+  async cachePermissions(userId, subaccountId, permissions, ttl = 3600) {
+    const key = `permissions:${userId}:${subaccountId}`;
+    return await this.set(key, permissions, ttl);
   }
 
-  async getPermissions(userId, subaccountId) {
-    const key = `${config.redis.prefixes.permissions}${userId}:${subaccountId}`;
+  async getCachedPermissions(userId, subaccountId) {
+    const key = `permissions:${userId}:${subaccountId}`;
     return await this.get(key);
   }
 
   async invalidatePermissions(userId, subaccountId) {
-    const key = `${config.redis.prefixes.permissions}${userId}:${subaccountId}`;
+    const key = `permissions:${userId}:${subaccountId}`;
     return await this.del(key);
   }
 
-  // Session management methods
-  async createSession(sessionId, sessionData, ttlSeconds = config.security.sessionTimeout / 1000) {
-    const key = `${config.redis.prefixes.session}${sessionId}`;
-    return await this.set(key, sessionData, ttlSeconds);
-  }
-
-  async getSession(sessionId) {
-    const key = `${config.redis.prefixes.session}${sessionId}`;
-    return await this.get(key);
-  }
-
-  async updateSession(sessionId, sessionData, ttlSeconds) {
-    const key = `${config.redis.prefixes.session}${sessionId}`;
-    return await this.set(key, sessionData, ttlSeconds);
-  }
-
-  async deleteSession(sessionId) {
-    const key = `${config.redis.prefixes.session}${sessionId}`;
-    return await this.del(key);
-  }
-
-  async extendSession(sessionId, ttlSeconds = config.security.sessionTimeout / 1000) {
-    const key = `${config.redis.prefixes.session}${sessionId}`;
-    return await this.expire(key, ttlSeconds);
-  }
-
-  // Bulk operations
-  async invalidateUserCache(userId) {
-    try {
-      if (!this.isConnected) {
-        return false;
-      }
-
-      const patterns = [
-        `${config.redis.prefixes.userSubaccount}${userId}`,
-        `${config.redis.prefixes.permissions}${userId}:*`
-      ];
-
-      let deleted = 0;
-      for (const pattern of patterns) {
-        if (pattern.includes('*')) {
-          // Use SCAN for pattern matching
-          const keys = await this.client.keys(pattern);
-          if (keys.length > 0) {
-            const result = await this.client.del(...keys);
-            deleted += result;
-          }
-        } else {
-          const result = await this.client.del(pattern);
-          deleted += result;
-        }
-      }
-
-      Logger.info('User cache invalidated:', { userId, keysDeleted: deleted });
-      return true;
-    } catch (error) {
-      Logger.error('Failed to invalidate user cache:', { userId, error: error.message });
-      return false;
+  // Health check
+  async ping() {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
     }
-  }
-
-  async invalidateSubaccountCache(subaccountId) {
-    try {
-      if (!this.isConnected) {
-        return false;
-      }
-
-      const patterns = [
-        `${config.redis.prefixes.subaccount}${subaccountId}`,
-        `${config.redis.prefixes.permissions}*:${subaccountId}`
-      ];
-
-      let deleted = 0;
-      for (const pattern of patterns) {
-        if (pattern.includes('*')) {
-          const keys = await this.client.keys(pattern);
-          if (keys.length > 0) {
-            const result = await this.client.del(...keys);
-            deleted += result;
-          }
-        } else {
-          const result = await this.client.del(pattern);
-          deleted += result;
-        }
-      }
-
-      Logger.info('Subaccount cache invalidated:', { subaccountId, keysDeleted: deleted });
-      return true;
-    } catch (error) {
-      Logger.error('Failed to invalidate subaccount cache:', { subaccountId, error: error.message });
-      return false;
-    }
-  }
-
-  // Rate limiting support
-  async incrementRateLimit(key, windowSeconds, maxRequests) {
-    try {
-      if (!this.isConnected) {
-        return { allowed: true, remaining: maxRequests };
-      }
-
-      const multi = this.client.multi();
-      multi.incr(key);
-      multi.expire(key, windowSeconds);
-      
-      const results = await multi.exec();
-      const currentRequests = results[0];
-      
-      const remaining = Math.max(0, maxRequests - currentRequests);
-      const allowed = currentRequests <= maxRequests;
-      
-      return { allowed, remaining, current: currentRequests };
-    } catch (error) {
-      Logger.error('Rate limit check failed:', { key, error: error.message });
-      return { allowed: true, remaining: maxRequests };
-    }
-  }
-
-  // Health check and statistics
-  async getStats() {
-    try {
-      if (!this.isConnected) {
-        return { connected: false };
-      }
-
-      const info = await this.client.info();
-      const memoryUsage = await this.client.memory('usage');
-      
-      return {
-        connected: this.isConnected,
-        info: this.parseRedisInfo(info),
-        memoryUsage,
-        reconnectAttempts: this.reconnectAttempts
-      };
-    } catch (error) {
-      Logger.error('Failed to get Redis stats:', { error: error.message });
-      return { connected: false, error: error.message };
-    }
-  }
-
-  parseRedisInfo(infoString) {
-    const info = {};
-    const lines = infoString.split('\r\n');
     
-    lines.forEach(line => {
-      if (line && !line.startsWith('#')) {
-        const [key, value] = line.split(':');
-        if (key && value) {
-          info[key] = value;
-        }
-      }
-    });
-    
-    return info;
-  }
-
-  // Cleanup and maintenance
-  async cleanup() {
     try {
-      if (!this.isConnected) {
-        return false;
-      }
-
-      // Clean up expired sessions (Redis handles this automatically, but we can log)
-      const sessionKeys = await this.client.keys(`${config.redis.prefixes.session}*`);
-      Logger.info('Active sessions:', { count: sessionKeys.length });
-      
-      return true;
+      const result = await this.client.ping();
+      return result === 'PONG';
     } catch (error) {
-      Logger.error('Cache cleanup failed:', { error: error.message });
-      return false;
+      Logger.error('Redis ping failed:', error);
+      throw error;
     }
   }
 }
 
-// Singleton instance
-const redisService = new RedisService();
-
-module.exports = redisService; 
+module.exports = RedisService;
