@@ -2,8 +2,7 @@ const app = require('./app');
 const config = require('../config/config');
 const Logger = require('./utils/logger');
 const Database = require("./utils/database");
-const RedisService = require("./services/redisService");
-const redisService = new RedisService();
+const redisManager = require('./services/redisManager');
 
 const PORT = config.server.port;
 
@@ -19,14 +18,8 @@ async function startServer() {
       Logger.warn('Database connection failed, continuing without database', { error: error.message });
     }
 
-    // Connect to Redis (optional - continue if fails)
-    try {
-      await redisService.connect();
-      Logger.info("Redis connected successfully");
-    } catch (error) {
-      Logger.warn("Redis connection failed, continuing without Redis", { error: error.message });
-    }
-    Logger.info('Skipping Redis connection for now');
+    // Initialize Redis (optional - continue if fails)
+    await redisManager.initialize();
 
     // Start HTTP server
     const server = app.listen(PORT, () => {
@@ -47,7 +40,7 @@ async function startServer() {
           
           // Close Redis connection
           try {
-            await redisService.disconnect();
+            await redisManager.shutdown();
             Logger.info("Redis connection closed");
           } catch (error) {
             Logger.warn("Error closing Redis connection", { error: error.message });

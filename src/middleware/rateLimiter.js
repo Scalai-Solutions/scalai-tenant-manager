@@ -2,30 +2,57 @@ const rateLimit = require('express-rate-limit');
 const slowDown = require('express-slow-down');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
-const redisService = require('../services/redisService');
+const redisManager = require('../services/redisManager');
+const MemoryRateLimitStore = require('./memoryStore');
 
-// Custom Redis store for rate limiting
-class RedisRateLimitStore {
+// Get Redis service instance
+const redisService = redisManager.getRedisService();
+
+// Hybrid rate limit store that uses Redis when available, memory as fallback
+class HybridRateLimitStore {
   constructor(options = {}) {
     this.prefix = options.prefix || 'rate_limit:';
     this.windowMs = options.windowMs || 60000;
+    this.memoryStore = new MemoryRateLimitStore(options);
   }
 
   async incr(key) {
     try {
-      const redisKey = `${this.prefix}${key}`;
-      const windowSeconds = Math.ceil(this.windowMs / 1000);
-      
-      const result = await redisService.incrementRateLimit(redisKey, windowSeconds, 1000);
-      
-      return {
-        totalHits: result.current,
-        totalTime: Date.now(),
-        resetTime: new Date(Date.now() + this.windowMs)
-      };
+      // Try Redis first if connected
+      if (redisService.isConnected) {
+        try {
+          const redisKey = `${this.prefix}${key}`;
+          const windowSeconds = Math.ceil(this.windowMs / 1000);
+          
+          const result = await redisService.incrementRateLimit(redisKey, windowSeconds, Date.now());
+          
+          Logger.debug('Using Redis rate limit store', { key: redisKey, current: result.current });
+          
+          return {
+            totalHits: result.current,
+            totalTime: Date.now(),
+            resetTime: new Date(Date.now() + this.windowMs)
+          };
+        } catch (redisError) {
+          Logger.warn('Redis rate limit failed, falling back to memory', { 
+            error: redisError.message, 
+            key 
+          });
+          // Fall through to memory store
+        }
+      }
+
+      // Use memory store as fallback
+      Logger.debug('Using memory rate limit store', { key, reason: 'Redis unavailable' });
+      return await this.memoryStore.incr(key);
+
     } catch (error) {
-      Logger.error('Rate limit store error', { error: error.message, key });
-      // Fallback to allowing request if Redis fails
+      Logger.error('Rate limit store error', { 
+        error: error.message, 
+        key,
+        stack: error.stack 
+      });
+      // Final fallback - allow request
       return {
         totalHits: 1,
         totalTime: Date.now(),
@@ -35,13 +62,24 @@ class RedisRateLimitStore {
   }
 
   async decrement(key) {
-    // Redis automatically handles expiration, so we don't need to implement this
-    return;
+    // Delegate to memory store for consistency
+    return await this.memoryStore.decrement(key);
   }
 
   async resetAll() {
-    // This would be used for testing - not implemented for production safety
-    Logger.warn('Rate limit resetAll called - not implemented for safety');
+    Logger.warn('Rate limit resetAll called');
+    await this.memoryStore.resetAll();
+  }
+
+  // Get stats from both stores
+  getStats() {
+    return {
+      redis: {
+        connected: redisService.isConnected,
+        status: redisService.isConnected ? 'active' : 'unavailable'
+      },
+      memory: this.memoryStore.getStats()
+    };
   }
 }
 
@@ -51,7 +89,7 @@ const generalLimiter = rateLimit({
   max: config.rateLimiting.max,
   standardHeaders: config.rateLimiting.standardHeaders,
   legacyHeaders: config.rateLimiting.legacyHeaders,
-  store: new RedisRateLimitStore({
+  store: new HybridRateLimitStore({
     prefix: 'general:',
     windowMs: config.rateLimiting.windowMs
   }),
@@ -82,7 +120,7 @@ const userLimiter = rateLimit({
   max: config.rateLimiting.perUser.max,
   standardHeaders: true,
   legacyHeaders: false,
-  store: new RedisRateLimitStore({
+  store: new HybridRateLimitStore({
     prefix: 'user:',
     windowMs: config.rateLimiting.perUser.windowMs
   }),
@@ -117,7 +155,7 @@ const adminLimiter = rateLimit({
   max: config.rateLimiting.admin.max,
   standardHeaders: true,
   legacyHeaders: false,
-  store: new RedisRateLimitStore({
+  store: new HybridRateLimitStore({
     prefix: 'admin:',
     windowMs: config.rateLimiting.admin.windowMs
   }),
@@ -147,7 +185,7 @@ const speedLimiter = slowDown({
   delayAfter: 50, // Allow 50 requests per minute without delay
   delayMs: () => 100, // Add 100ms delay per request after delayAfter
   maxDelayMs: 2000, // Maximum delay of 2 seconds
-  store: new RedisRateLimitStore({
+  store: new HybridRateLimitStore({
     prefix: 'slow:',
     windowMs: 60 * 1000
   }),
@@ -161,7 +199,7 @@ const subaccountLimiter = (maxRequests = 100, windowMs = 60000) => {
   return rateLimit({
     windowMs,
     max: maxRequests,
-    store: new RedisRateLimitStore({
+    store: new HybridRateLimitStore({
       prefix: 'subaccount:',
       windowMs
     }),
@@ -195,7 +233,7 @@ const subaccountLimiter = (maxRequests = 100, windowMs = 60000) => {
 const createRateLimiter = (options) => {
   return rateLimit({
     ...options,
-    store: new RedisRateLimitStore({
+    store: new HybridRateLimitStore({
       prefix: options.prefix || 'custom:',
       windowMs: options.windowMs
     }),
@@ -347,5 +385,5 @@ module.exports = {
   passwordResetLimiter,
   dynamicUserLimiter,
   getRateLimitStatus,
-  RedisRateLimitStore
+  HybridRateLimitStore
 }; 

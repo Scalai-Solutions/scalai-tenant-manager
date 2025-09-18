@@ -1,8 +1,11 @@
 const mongoose = require('mongoose');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
-const redisService = require('../services/redisService');
+const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
+
+// Get Redis service instance
+const redisService = redisManager.getRedisService();
 
 // Import models
 const Subaccount = require('../models/Subaccount');
@@ -13,6 +16,7 @@ const AuditLog = require('../models/AuditLog');
 class SubaccountController {
   // Get user's subaccounts with caching
   static async getUserSubaccounts(req, res, next) {
+    const startTime = Date.now();
     try {
       const userId = req.user.id;
       const { page = 1, limit = 20, role, status } = req.query;
@@ -22,9 +26,19 @@ class SubaccountController {
         query: req.query
       });
 
-      // Check cache first
+      Logger.debug('Starting getUserSubaccounts', { userId, startTime });
+
+      // Check cache first (if Redis is connected)
+      let cachedData = null;
       const cacheKey = `user_subaccounts:${userId}:${JSON.stringify(req.query)}`;
-      const cachedData = await redisService.get(cacheKey);
+      
+      if (redisService.isConnected) {
+        try {
+          cachedData = await redisService.get(cacheKey);
+        } catch (error) {
+          Logger.warn('Cache get failed, continuing without cache', { error: error.message, cacheKey });
+        }
+      }
       
       if (cachedData) {
         Logger.debug('Returning cached subaccounts', { userId, cacheKey });
@@ -40,23 +54,28 @@ class SubaccountController {
       const query = { userId, isActive: true };
       if (role) query.role = role;
 
-      // Get user subaccounts with pagination
+      // Get user subaccounts with pagination and timeout
       const skip = (page - 1) * limit;
-      const userSubaccounts = await UserSubaccount.find(query)
-        .populate({
-          path: 'subaccountId',
-          match: status ? { isActive: status === 'active' } : {},
-          select: 'name description isActive stats createdAt maintenanceMode rateLimits'
-        })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit));
+      
+      // Add timeout to prevent hanging queries
+      const queryTimeout = 15000; // 15 seconds
+      
+      const [userSubaccounts, total] = await Promise.all([
+        UserSubaccount.find(query)
+          .populate({
+            path: 'subaccountId',
+            match: status ? { isActive: status === 'active' } : {},
+            select: 'name description isActive stats createdAt maintenanceMode rateLimits'
+          })
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .maxTimeMS(queryTimeout),
+        UserSubaccount.countDocuments(query).maxTimeMS(queryTimeout)
+      ]);
 
       // Filter out null subaccounts (from populate match)
       const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
-
-      // Get total count
-      const total = await UserSubaccount.countDocuments(query);
 
       const result = {
         subaccounts: validSubaccounts.map(us => ({
@@ -81,22 +100,50 @@ class SubaccountController {
         }
       };
 
-      // Cache the result for 30 minutes
-      await redisService.set(cacheKey, result, 1800);
+      // Cache the result for 30 minutes (if Redis is connected)
+      if (redisService.isConnected) {
+        try {
+          await redisService.set(cacheKey, result, 1800);
+        } catch (error) {
+          Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
+        }
+      }
 
+      const duration = Date.now() - startTime;
       Logger.info('User subaccounts retrieved', {
         userId,
         count: result.subaccounts.length,
-        total
+        total,
+        duration: `${duration}ms`
       });
 
       res.json({
         success: true,
         message: 'Subaccounts retrieved successfully',
-        data: result
+        data: result,
+        meta: {
+          duration: `${duration}ms`,
+          cached: false
+        }
       });
 
     } catch (error) {
+      // Check if it's a timeout error
+      if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+        Logger.error('Database query timeout in getUserSubaccounts', {
+          userId: req.user?.id,
+          query: req.query,
+          error: error.message,
+          timeout: '15s'
+        });
+        
+        return res.status(408).json({
+          success: false,
+          message: 'Request timeout - database query took too long',
+          code: 'DATABASE_TIMEOUT'
+        });
+      }
+
       Logger.error('Failed to get user subaccounts', {
         error: error.message,
         stack: error.stack,

@@ -213,6 +213,57 @@ class RedisService {
     return await this.del(key);
   }
 
+  // Rate limiting methods
+  async incrementRateLimit(key, windowSeconds, currentTimestamp = Date.now()) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
+    try {
+      // Use Redis INCR with EXPIRE for atomic operation
+      const multi = this.client.multi();
+      multi.incr(key);
+      multi.expire(key, windowSeconds);
+      
+      const results = await multi.exec();
+      const current = results[0][1]; // INCR result
+      
+      return {
+        current,
+        remaining: Math.max(0, windowSeconds - current),
+        resetTime: currentTimestamp + (windowSeconds * 1000)
+      };
+    } catch (error) {
+      Logger.error('Redis incrementRateLimit error:', error);
+      throw error;
+    }
+  }
+
+  async getRateLimit(key) {
+    if (!this.isConnected) {
+      throw new Error('Redis client not connected');
+    }
+    
+    try {
+      const multi = this.client.multi();
+      multi.get(key);
+      multi.ttl(key);
+      
+      const results = await multi.exec();
+      const current = parseInt(results[0][1]) || 0;
+      const ttl = results[1][1];
+      
+      return {
+        current,
+        ttl,
+        resetTime: ttl > 0 ? Date.now() + (ttl * 1000) : null
+      };
+    } catch (error) {
+      Logger.error('Redis getRateLimit error:', error);
+      throw error;
+    }
+  }
+
   // Health check
   async ping() {
     if (!this.isConnected) {
