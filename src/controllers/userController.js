@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
-const redisService = require('../services/redisService');
+const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
 
 // Import models
@@ -39,9 +39,20 @@ class UserController {
         });
       }
 
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
       // Check cache first
       const cacheKey = `subaccount_users:${subaccountId}:${JSON.stringify(req.query)}`;
-      const cachedData = await redisService.get(cacheKey);
+      let cachedData = null;
+      
+      if (redisService && redisService.isConnected) {
+        try {
+          cachedData = await redisService.get(cacheKey);
+        } catch (error) {
+          Logger.warn('Cache get failed, continuing without cache', { error: error.message, cacheKey });
+        }
+      }
       
       if (cachedData) {
         Logger.debug('Returning cached subaccount users', { subaccountId, cacheKey });
@@ -115,7 +126,13 @@ class UserController {
       };
 
       // Cache the result for 15 minutes
-      await redisService.set(cacheKey, result, 900);
+      if (redisService && redisService.isConnected) {
+        try {
+          await redisService.set(cacheKey, result, 900);
+        } catch (error) {
+          Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
+        }
+      }
 
       Logger.info('Subaccount users retrieved', {
         userId,
@@ -273,10 +290,17 @@ class UserController {
       );
 
       // Invalidate caches
-      await Promise.all([
-        redisService.invalidateUserSubaccounts(inviteeUser._id),
-        redisService.invalidateSubaccountCache(subaccountId)
-      ]);
+      const redisService = redisManager.getRedisService();
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidateUserSubaccounts(inviteeUser._id),
+            redisService.invalidateSubaccountCache(subaccountId)
+          ]);
+        } catch (error) {
+          Logger.warn('Cache invalidation failed', { error: error.message });
+        }
+      }
 
       Logger.info('User invited to subaccount successfully', {
         userId,
@@ -430,10 +454,17 @@ class UserController {
       ).populate('userId', 'firstName lastName email');
 
       // Invalidate caches
-      await Promise.all([
-        redisService.invalidatePermissions(targetUserId, subaccountId),
-        redisService.invalidateUserSubaccounts(targetUserId)
-      ]);
+      const redisService = redisManager.getRedisService();
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidatePermissions(targetUserId, subaccountId),
+            redisService.invalidateUserSubaccounts(targetUserId)
+          ]);
+        } catch (error) {
+          Logger.warn('Cache invalidation failed', { error: error.message });
+        }
+      }
 
       Logger.info('User permissions updated successfully', {
         userId,
@@ -561,11 +592,18 @@ class UserController {
       });
 
       // Invalidate caches
-      await Promise.all([
-        redisService.invalidateUserSubaccounts(targetUserId),
-        redisService.invalidatePermissions(targetUserId, subaccountId),
-        redisService.invalidateSubaccountCache(subaccountId)
-      ]);
+      const redisService = redisManager.getRedisService();
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidateUserSubaccounts(targetUserId),
+            redisService.invalidatePermissions(targetUserId, subaccountId),
+            redisService.invalidateSubaccountCache(subaccountId)
+          ]);
+        } catch (error) {
+          Logger.warn('Cache invalidation failed', { error: error.message });
+        }
+      }
 
       Logger.security('User removed from subaccount', 'medium', {
         userId,

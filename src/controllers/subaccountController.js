@@ -4,9 +4,6 @@ const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
 
-// Get Redis service instance
-const redisService = redisManager.getRedisService();
-
 // Import models
 const Subaccount = require('../models/Subaccount');
 const UserSubaccount = require('../models/UserSubaccount');
@@ -28,11 +25,14 @@ class SubaccountController {
 
       Logger.debug('Starting getUserSubaccounts', { userId, startTime });
 
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
       // Check cache first (if Redis is connected)
       let cachedData = null;
       const cacheKey = `user_subaccounts:${userId}:${JSON.stringify(req.query)}`;
       
-      if (redisService.isConnected) {
+      if (redisService && redisService.isConnected) {
         try {
           cachedData = await redisService.get(cacheKey);
         } catch (error) {
@@ -60,22 +60,45 @@ class SubaccountController {
       // Add timeout to prevent hanging queries
       const queryTimeout = 15000; // 15 seconds
       
-      const [userSubaccounts, total] = await Promise.all([
-        UserSubaccount.find(query)
-          .populate({
-            path: 'subaccountId',
-            match: status ? { isActive: status === 'active' } : {},
-            select: 'name description isActive stats createdAt maintenanceMode rateLimits'
-          })
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(parseInt(limit))
-          .maxTimeMS(queryTimeout),
-        UserSubaccount.countDocuments(query).maxTimeMS(queryTimeout)
-      ]);
+      Logger.debug('Executing database query', { query, skip, limit, queryTimeout });
+      
+      try {
+        const [userSubaccounts, total] = await Promise.race([
+          Promise.all([
+            UserSubaccount.find(query)
+              .populate({
+                path: 'subaccountId',
+                match: status ? { isActive: status === 'active' } : {},
+                select: 'name description isActive stats createdAt maintenanceMode rateLimits'
+              })
+              .sort({ createdAt: -1 })
+              .skip(skip)
+              .limit(parseInt(limit))
+              .maxTimeMS(queryTimeout),
+            UserSubaccount.countDocuments(query).maxTimeMS(queryTimeout)
+          ]),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Database query timeout')), queryTimeout + 1000)
+          )
+        ]);
 
-      // Filter out null subaccounts (from populate match)
-      const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
+        Logger.debug('Database query completed', { 
+          userSubaccountsCount: userSubaccounts.length, 
+          total,
+          duration: Date.now() - startTime 
+        });
+
+        // Filter out null subaccounts (from populate match)
+        const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
+      } catch (dbError) {
+        Logger.error('Database query failed', {
+          error: dbError.message,
+          query,
+          userId,
+          duration: Date.now() - startTime
+        });
+        throw new Error(`Database query failed: ${dbError.message}`);
+      }
 
       const result = {
         subaccounts: validSubaccounts.map(us => ({
@@ -101,7 +124,7 @@ class SubaccountController {
       };
 
       // Cache the result for 30 minutes (if Redis is connected)
-      if (redisService.isConnected) {
+      if (redisService && redisService.isConnected) {
         try {
           await redisService.set(cacheKey, result, 1800);
         } catch (error) {
@@ -159,13 +182,16 @@ class SubaccountController {
       const { subaccountId } = req.params;
       const userId = req.user.id;
 
-      Logger.audit('Get subaccount details', 'subaccount', {
+      Logger.audit('Get subaccount details', 'subaccounts', {
         userId,
         subaccountId
       });
 
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
       // Check cache first
-      const cachedSubaccount = await redisService.getSubaccount(subaccountId);
+      const cachedSubaccount = await redisService.getCachedSubaccount(subaccountId);
       if (cachedSubaccount) {
         Logger.debug('Returning cached subaccount', { subaccountId });
         return res.json({
@@ -176,27 +202,33 @@ class SubaccountController {
         });
       }
 
-      // Get subaccount with user permissions
+      // Get user's access to this subaccount
       const userSubaccount = await UserSubaccount.findOne({
         userId,
         subaccountId,
         isActive: true
-      }).populate({
-        path: 'subaccountId',
-        select: '-mongodbUrl -encryptionIV -encryptionAuthTag'
       });
 
-      if (!userSubaccount || !userSubaccount.subaccountId) {
+      if (!userSubaccount) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied to subaccount',
+          code: 'SUBACCOUNT_ACCESS_DENIED'
+        });
+      }
+
+      // Get subaccount details
+      const subaccount = await Subaccount.findById(subaccountId);
+      
+      if (!subaccount) {
         return res.status(404).json({
           success: false,
-          message: 'Subaccount not found or access denied',
+          message: 'Subaccount not found',
           code: 'SUBACCOUNT_NOT_FOUND'
         });
       }
 
-      const subaccount = userSubaccount.subaccountId;
-      
-      // Get additional statistics
+      // Get user count for this subaccount
       const userCount = await UserSubaccount.countDocuments({
         subaccountId,
         isActive: true
@@ -275,6 +307,9 @@ class SubaccountController {
         name,
         databaseName
       });
+
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
 
       // Check if user has reached subaccount limit
       const userSubaccountCount = await UserSubaccount.countDocuments({
@@ -432,6 +467,9 @@ class SubaccountController {
         updates: Object.keys(updates)
       });
 
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
       // Check if user has admin permissions
       const userSubaccount = await UserSubaccount.findOne({
         userId,
@@ -527,6 +565,9 @@ class SubaccountController {
         subaccountId
       });
 
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
       // Check if user is owner
       const userSubaccount = await UserSubaccount.findOne({
         userId,
@@ -613,6 +654,9 @@ class SubaccountController {
         userId,
         subaccountId
       });
+
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
 
       // Check admin permissions
       const userSubaccount = await UserSubaccount.findOne({

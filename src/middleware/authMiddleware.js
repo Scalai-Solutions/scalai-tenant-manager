@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
-const redisService = require('../services/redisService');
 const { v4: uuidv4 } = require('uuid');
 
 // JWT token authentication middleware
@@ -178,8 +177,16 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
       // Import UserSubaccount model (avoid circular dependency)
       const UserSubaccount = require('../models/UserSubaccount');
       
+      // Get Redis service instance (dynamic)
+      const redisManager = require('../services/redisManager');
+      const redisService = redisManager.getRedisService();
+      
       // Check cache first
-      const cachedPermissions = await redisService.getPermissions(req.user.id, subaccountId);
+      const cachedPermissions = redisService && redisService.isConnected ? 
+        await redisService.getCachedPermissions(req.user.id, subaccountId).catch(err => {
+          Logger.warn('Cache get failed for permissions', { error: err.message });
+          return null;
+        }) : null;
       let accessResult;
 
       if (cachedPermissions) {
@@ -204,13 +211,17 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
         );
 
         // Cache the result if access is granted
-        if (accessResult.hasAccess) {
-          await redisService.cachePermissions(
-            req.user.id,
-            subaccountId,
-            accessResult.permissions,
-            3600 // 1 hour
-          );
+        if (accessResult.hasAccess && redisService && redisService.isConnected) {
+          try {
+            await redisService.cachePermissions(
+              req.user.id,
+              subaccountId,
+              accessResult.permissions,
+              3600 // 1 hour
+            );
+          } catch (error) {
+            Logger.warn('Cache set failed for permissions', { error: error.message });
+          }
         }
       }
 
