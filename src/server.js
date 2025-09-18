@@ -1,7 +1,9 @@
 const app = require('./app');
 const config = require('../config/config');
 const Logger = require('./utils/logger');
-const Database = require('./utils/database');
+const Database = require("./utils/database");
+const RedisService = require("./services/redisService");
+const redisService = new RedisService();
 
 const PORT = config.server.port;
 
@@ -17,7 +19,13 @@ async function startServer() {
       Logger.warn('Database connection failed, continuing without database', { error: error.message });
     }
 
-    // Skip Redis connection for now to avoid crashes
+    // Connect to Redis (optional - continue if fails)
+    try {
+      await redisService.connect();
+      Logger.info("Redis connected successfully");
+    } catch (error) {
+      Logger.warn("Redis connection failed, continuing without Redis", { error: error.message });
+    }
     Logger.info('Skipping Redis connection for now');
 
     // Start HTTP server
@@ -36,6 +44,14 @@ async function startServer() {
           
           // Close database connection
           await Database.disconnect();
+          
+          // Close Redis connection
+          try {
+            await redisService.disconnect();
+            Logger.info("Redis connection closed");
+          } catch (error) {
+            Logger.warn("Error closing Redis connection", { error: error.message });
+          }
           Logger.info('Database connection closed');
           
           Logger.info('Tenant Manager shutdown complete');
