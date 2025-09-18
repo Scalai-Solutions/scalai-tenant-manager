@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const config = {
   server: {
-    port: process.env.TENANT_PORT || 3003,
+    port: process.env.PORT || process.env.TENANT_PORT || 3003,
     nodeEnv: process.env.NODE_ENV || 'development',
     serviceName: 'tenant-manager'
   },
