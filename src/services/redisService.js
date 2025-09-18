@@ -15,9 +15,13 @@ class RedisService {
     try {
       // Create Redis client with configuration
       if (config.redis.url) {
-        // Use REDIS_URL directly if available
+        // Use REDIS_URL directly if available - disable SSL verification for Heroku Redis
         this.client = redis.createClient({
-          url: config.redis.url
+          url: config.redis.url,
+          socket: {
+            tls: true,
+            rejectUnauthorized: false
+          }
         });
       } else {
         // Fall back to individual host/port/password
@@ -26,12 +30,10 @@ class RedisService {
           port: config.redis.port,
           password: config.redis.password,
           db: config.redis.db,
-          retryDelayOnFailover: 100,
-          enableReadyCheck: true,
-          maxRetriesPerRequest: 3,
-          lazyConnect: true,
-          keepAlive: true,
-          family: 4
+          socket: {
+            tls: true,
+            rejectUnauthorized: false
+          }
         });
       }
 
