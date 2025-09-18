@@ -2,7 +2,8 @@ const app = require('./app');
 const config = require('../config/config');
 const Logger = require('./utils/logger');
 const Database = require('./utils/database');
-const redisService = require('./services/redisService');
+const RedisService = require("./services/redisService");
+const redisService = new RedisService();
 
 const PORT = config.server.port;
 
