@@ -14,6 +14,7 @@ class SubaccountController {
   // Get user's subaccounts with caching
   static async getUserSubaccounts(req, res, next) {
     const startTime = Date.now();
+    
     try {
       const userId = req.user.id;
       const { page = 1, limit = 20, role, status } = req.query;
@@ -90,7 +91,55 @@ class SubaccountController {
 
         // Filter out null subaccounts (from populate match)
         const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
+        console.log('[DEBUG] Filtered subaccounts', { validCount: validSubaccounts.length });
+
+        const result = {
+          subaccounts: validSubaccounts.map(us => ({
+            id: us.subaccountId._id,
+            name: us.subaccountId.name,
+            description: us.subaccountId.description,
+            isActive: us.subaccountId.isActive,
+            maintenanceMode: us.subaccountId.maintenanceMode,
+            role: us.role,
+            permissions: us.permissions,
+            stats: us.subaccountId.stats,
+            rateLimits: us.subaccountId.rateLimits,
+            joinedAt: us.createdAt,
+            lastAccessed: us.lastAccessed,
+            userStats: us.stats
+          })),
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total,
+            pages: Math.ceil(total / limit)
+          }
+        };
+
+        // Cache the result for 30 minutes (if Redis is connected)
+        if (redisService && redisService.isConnected) {
+          try {
+            await redisService.set(cacheKey, result, 1800);
+          } catch (error) {
+            Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
+          }
+        }
+
+        const duration = Date.now() - startTime;
+        Logger.info('User subaccounts retrieved', {
+          userId,
+          count: result.subaccounts.length,
+          total,
+          duration: `${duration}ms`
+        });
+
+        res.json({
+          success: true,
+          message: 'Subaccounts retrieved successfully',
+          data: result
+        });
       } catch (dbError) {
+        console.log('[DEBUG] Database query failed', dbError.message);
         Logger.error('Database query failed', {
           error: dbError.message,
           query,
@@ -99,56 +148,6 @@ class SubaccountController {
         });
         throw new Error(`Database query failed: ${dbError.message}`);
       }
-
-      const result = {
-        subaccounts: validSubaccounts.map(us => ({
-          id: us.subaccountId._id,
-          name: us.subaccountId.name,
-          description: us.subaccountId.description,
-          isActive: us.subaccountId.isActive,
-          maintenanceMode: us.subaccountId.maintenanceMode,
-          role: us.role,
-          permissions: us.permissions,
-          stats: us.subaccountId.stats,
-          rateLimits: us.subaccountId.rateLimits,
-          joinedAt: us.createdAt,
-          lastAccessed: us.lastAccessed,
-          userStats: us.stats
-        })),
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total,
-          pages: Math.ceil(total / limit)
-        }
-      };
-
-      // Cache the result for 30 minutes (if Redis is connected)
-      if (redisService && redisService.isConnected) {
-        try {
-          await redisService.set(cacheKey, result, 1800);
-        } catch (error) {
-          Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
-        }
-      }
-
-      const duration = Date.now() - startTime;
-      Logger.info('User subaccounts retrieved', {
-        userId,
-        count: result.subaccounts.length,
-        total,
-        duration: `${duration}ms`
-      });
-
-      res.json({
-        success: true,
-        message: 'Subaccounts retrieved successfully',
-        data: result,
-        meta: {
-          duration: `${duration}ms`,
-          cached: false
-        }
-      });
 
     } catch (error) {
       // Check if it's a timeout error

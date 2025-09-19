@@ -29,6 +29,26 @@ class MemoryRateLimitStore {
     }
   }
 
+  async get(key) {
+    try {
+      const storeKey = `${this.prefix}${key}`;
+      const entry = this.store.get(storeKey);
+      const now = Date.now();
+
+      if (!entry || entry.resetTime < now) {
+        return undefined;
+      }
+
+      return {
+        totalHits: entry.totalHits,
+        resetTime: new Date(entry.resetTime)
+      };
+    } catch (error) {
+      Logger.error('Memory rate limit store get error', { error: error.message, key });
+      return undefined;
+    }
+  }
+
   async incr(key) {
     try {
       const storeKey = `${this.prefix}${key}`;
@@ -60,7 +80,6 @@ class MemoryRateLimitStore {
 
       return {
         totalHits: entry.totalHits,
-        totalTime: entry.totalTime,
         resetTime: new Date(entry.resetTime)
       };
     } catch (error) {
@@ -68,7 +87,6 @@ class MemoryRateLimitStore {
       // Return safe default
       return {
         totalHits: 1,
-        totalTime: Date.now(),
         resetTime: new Date(Date.now() + this.windowMs)
       };
     }
@@ -77,6 +95,16 @@ class MemoryRateLimitStore {
   async decrement(key) {
     // Not implemented for memory store - entries expire naturally
     return;
+  }
+
+  async resetKey(key) {
+    try {
+      const storeKey = `${this.prefix}${key}`;
+      this.store.delete(storeKey);
+      Logger.debug('Memory rate limit store key reset', { key: storeKey });
+    } catch (error) {
+      Logger.error('Memory rate limit store resetKey error', { error: error.message, key });
+    }
   }
 
   async resetAll() {

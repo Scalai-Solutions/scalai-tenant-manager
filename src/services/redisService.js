@@ -226,7 +226,7 @@ class RedisService {
       multi.expire(key, windowSeconds);
       
       const results = await multi.exec();
-      const current = results[0][1]; // INCR result
+      const current = results[0]; // INCR result (fixed from results[0][1])
       
       return {
         current,

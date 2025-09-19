@@ -26,6 +26,7 @@ const {
 
 // Apply common middleware
 router.use(requestLogger);
+
 router.use(authenticateToken);
 router.use(userLimiter);
 

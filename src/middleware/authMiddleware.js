@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
+const redisService = require('../services/redisService');
 const { v4: uuidv4 } = require('uuid');
 
 // JWT token authentication middleware
@@ -23,49 +24,16 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // Verify JWT token
+    // Verify the token
     const decoded = jwt.verify(token, config.jwt.secret);
     
-    // Check if session exists in Redis
-    const sessionData = await redisService.getSession(decoded.jti);
-    if (!sessionData) {
-      Logger.security('Invalid or expired session', 'medium', {
-        userId: decoded.id,
-        tokenId: decoded.jti,
-        ip: req.ip
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: 'Session expired or invalid',
-        code: 'SESSION_INVALID'
-      });
-    }
-
-    // Extend session if it's close to expiration
-    const sessionTTL = await redisService.client.ttl(`${config.redis.prefixes.session}${decoded.jti}`);
-    if (sessionTTL < 3600) { // Less than 1 hour remaining
-      await redisService.extendSession(decoded.jti);
-      Logger.debug('Session extended', { userId: decoded.id, tokenId: decoded.jti });
-    }
-
-    // Add user info and session data to request
+    // Add user info to request
     req.user = {
       id: decoded.id,
       email: decoded.email,
-      role: decoded.role,
-      sessionId: decoded.jti,
-      ...sessionData
+      iat: decoded.iat,
+      exp: decoded.exp
     };
-
-    // Add request ID for tracing
-    req.requestId = uuidv4();
-
-    Logger.debug('Token authenticated successfully', {
-      userId: req.user.id,
-      email: req.user.email,
-      requestId: req.requestId
-    });
 
     next();
   } catch (error) {
@@ -177,16 +145,8 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
       // Import UserSubaccount model (avoid circular dependency)
       const UserSubaccount = require('../models/UserSubaccount');
       
-      // Get Redis service instance (dynamic)
-      const redisManager = require('../services/redisManager');
-      const redisService = redisManager.getRedisService();
-      
       // Check cache first
-      const cachedPermissions = redisService && redisService.isConnected ? 
-        await redisService.getCachedPermissions(req.user.id, subaccountId).catch(err => {
-          Logger.warn('Cache get failed for permissions', { error: err.message });
-          return null;
-        }) : null;
+      const cachedPermissions = await redisService.getPermissions(req.user.id, subaccountId);
       let accessResult;
 
       if (cachedPermissions) {
@@ -211,17 +171,13 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
         );
 
         // Cache the result if access is granted
-        if (accessResult.hasAccess && redisService && redisService.isConnected) {
-          try {
-            await redisService.cachePermissions(
-              req.user.id,
-              subaccountId,
-              accessResult.permissions,
-              3600 // 1 hour
-            );
-          } catch (error) {
-            Logger.warn('Cache set failed for permissions', { error: error.message });
-          }
+        if (accessResult.hasAccess) {
+          await redisService.cachePermissions(
+            req.user.id,
+            subaccountId,
+            accessResult.permissions,
+            3600 // 1 hour
+          );
         }
       }
 
