@@ -64,21 +64,33 @@ const subaccountSchema = new mongoose.Schema({
     default: true
   },
   
-  allowedCollections: [{
-    name: {
-      type: String,
-      required: true
-    },
-    schema: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    },
-    permissions: {
-      read: { type: Boolean, default: true },
-      write: { type: Boolean, default: true },
-      delete: { type: Boolean, default: false }
+  allowedCollections: {
+    type: [mongoose.Schema.Types.Mixed], // Allow both strings and objects
+    default: [],
+    validate: {
+      validator: function(collections) {
+        // Allow empty array
+        if (!collections || collections.length === 0) return true;
+        
+        // Check if it contains wildcard
+        const hasWildcard = collections.some(item => item === '*');
+        
+        if (hasWildcard) {
+          // If wildcard is present, it should be the only item
+          return collections.length === 1 && collections[0] === '*';
+        }
+        
+        // Otherwise, all items should be collection objects
+        return collections.every(item => 
+          item && 
+          typeof item === 'object' && 
+          typeof item.name === 'string' &&
+          item.name.length > 0
+        );
+      },
+      message: 'Invalid allowedCollections: use ["*"] for all collections or array of collection objects'
     }
-  }],
+  },
   
   // Ownership and management
   createdBy: {

@@ -62,23 +62,59 @@ const createSubaccountSchema = Joi.object({
     
   allowedCollections: Joi.array()
     .items(
-      Joi.object({
-        name: Joi.string()
-          .trim()
-          .pattern(/^[a-zA-Z0-9_-]+$/)
-          .required()
-          .messages({
-            'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
-          }),
-        schema: Joi.object().default({}),
-        permissions: Joi.object({
-          read: Joi.boolean().default(true),
-          write: Joi.boolean().default(true),
-          delete: Joi.boolean().default(false)
-        }).default()
-      })
+      Joi.alternatives().try(
+        // Wildcard option - allow all collections
+        Joi.string().valid('*').messages({
+          'any.only': 'Wildcard must be exactly "*" to allow all collections'
+        }),
+        // Specific collection configuration
+        Joi.object({
+          name: Joi.string()
+            .trim()
+            .pattern(/^[a-zA-Z0-9_-]+$/)
+            .required()
+            .messages({
+              'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
+            }),
+          schema: Joi.object().default({}),
+          permissions: Joi.object({
+            read: Joi.boolean().default(true),
+            write: Joi.boolean().default(true),
+            delete: Joi.boolean().default(false)
+          }).default()
+        })
+      )
     )
-    .default([]),
+    .default([])
+    .custom((value, helpers) => {
+      // Custom validation for wildcard rules
+      if (!Array.isArray(value)) return value;
+      
+      const hasWildcard = value.some(item => item === '*');
+      
+      if (hasWildcard) {
+        // If wildcard is present, it must be the only item
+        if (value.length !== 1) {
+          return helpers.error('any.custom', { 
+            message: 'Wildcard "*" must be the only item in allowedCollections array' 
+          });
+        }
+        
+        // Ensure the wildcard is exactly "*"
+        if (value[0] !== '*') {
+          return helpers.error('any.custom', { 
+            message: 'Wildcard must be exactly "*"' 
+          });
+        }
+      }
+      
+      return value;
+    })
+    .messages({
+      'array.base': 'Allowed collections must be an array',
+      'alternatives.match': 'Each item must be either "*" (wildcard) or a collection configuration object',
+      'any.custom': '{{#message}}'
+    }),
     
   rateLimits: Joi.object({
     queriesPerMinute: Joi.number()
@@ -130,22 +166,33 @@ const updateSubaccountSchema = Joi.object({
     
   allowedCollections: Joi.array()
     .items(
-      Joi.object({
-        name: Joi.string()
-          .trim()
-          .pattern(/^[a-zA-Z0-9_-]+$/)
-          .required()
-          .messages({
-            'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
-          }),
-        schema: Joi.object().default({}),
-        permissions: Joi.object({
-          read: Joi.boolean().default(true),
-          write: Joi.boolean().default(true),
-          delete: Joi.boolean().default(false)
-        }).default()
-      })
-    ),
+      Joi.alternatives().try(
+        // Wildcard option - allow all collections
+        Joi.string().valid('*').messages({
+          'any.only': 'Wildcard must be exactly "*" to allow all collections'
+        }),
+        // Specific collection configuration
+        Joi.object({
+          name: Joi.string()
+            .trim()
+            .pattern(/^[a-zA-Z0-9_-]+$/)
+            .required()
+            .messages({
+              'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
+            }),
+          schema: Joi.object().default({}),
+          permissions: Joi.object({
+            read: Joi.boolean().default(true),
+            write: Joi.boolean().default(true),
+            delete: Joi.boolean().default(false)
+          }).default()
+        })
+      )
+    )
+    .messages({
+      'array.base': 'Allowed collections must be an array',
+      'alternatives.match': 'Each item must be either "*" (wildcard) or a collection configuration object'
+    }),
     
   rateLimits: Joi.object({
     queriesPerMinute: Joi.number()
