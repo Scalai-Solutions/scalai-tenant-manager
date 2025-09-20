@@ -219,20 +219,45 @@ subaccountSchema.methods.testConnection = async function() {
   
   try {
     const connectionUrl = this.getDecryptedUrl();
+    
+    // Create test connection with timeout
     testConnection = await mongoose.createConnection(connectionUrl, {
       serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 5000
+      connectTimeoutMS: 5000,
+      maxPoolSize: 1, // Single connection for testing
+      minPoolSize: 0
     });
     
-    // Test basic operation
-    await testConnection.db.admin().ping();
+    // Wait for connection to be ready
+    await new Promise((resolve, reject) => {
+      testConnection.once('connected', resolve);
+      testConnection.once('error', reject);
+      
+      // Timeout after 5 seconds
+      setTimeout(() => reject(new Error('Connection timeout')), 5000);
+    });
     
-    return { success: true, message: 'Connection successful' };
+    // Test basic operation with error handling
+    if (testConnection.readyState === 1) { // Connected
+      try {
+        await testConnection.db.admin().ping();
+        return { success: true, message: 'Connection successful' };
+      } catch (pingError) {
+        return { success: false, message: `Ping failed: ${pingError.message}` };
+      }
+    } else {
+      return { success: false, message: 'Connection not ready' };
+    }
+    
   } catch (error) {
     return { success: false, message: error.message };
   } finally {
     if (testConnection) {
-      await testConnection.close();
+      try {
+        await testConnection.close();
+      } catch (closeError) {
+        // Ignore close errors
+      }
     }
   }
 };
