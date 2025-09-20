@@ -31,6 +31,7 @@ const authenticateToken = async (req, res, next) => {
     req.user = {
       id: decoded.id,
       email: decoded.email,
+      role: decoded.role, // Include role from JWT
       iat: decoded.iat,
       exp: decoded.exp
     };
