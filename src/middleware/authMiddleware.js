@@ -147,7 +147,7 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
       const UserSubaccount = require('../models/UserSubaccount');
       
       // Check cache first
-      const cachedPermissions = await redisService.getPermissions(req.user.id, subaccountId);
+      const cachedPermissions = await redisService.getCachedPermissions(req.user.id, subaccountId);
       let accessResult;
 
       if (cachedPermissions) {
