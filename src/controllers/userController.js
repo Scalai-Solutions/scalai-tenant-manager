@@ -215,19 +215,24 @@ class UserController {
         });
       }
 
-      // Find the user to invite
-      const inviteeUser = await User.findOne({ email, isActive: true });
-      if (!inviteeUser) {
+      // Find the user to invite via auth service
+      const authService = require('../services/authService');
+      const token = req.headers.authorization?.split(' ')[1];
+      
+      const userResult = await authService.validateUser(email, token);
+      if (!userResult.success) {
         return res.status(404).json({
           success: false,
-          message: 'User not found or inactive',
+          message: userResult.message === 'User not found' ? 'User not found or inactive' : userResult.message,
           code: 'USER_NOT_FOUND'
         });
       }
+      
+      const inviteeUser = userResult.user;
 
       // Check if user is already associated with this subaccount
       const existingAssociation = await UserSubaccount.findOne({
-        userId: inviteeUser._id,
+        userId: inviteeUser.id,
         subaccountId,
         isActive: true
       });
@@ -252,7 +257,7 @@ class UserController {
 
       // Create user-subaccount relationship
       const newUserSubaccount = new UserSubaccount({
-        userId: inviteeUser._id,
+        userId: inviteeUser.id,
         subaccountId,
         role,
         permissions: {
