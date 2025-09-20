@@ -145,20 +145,18 @@ subaccountSchema.index({ name: 1, createdBy: 1 });
 // Static method to encrypt connection string
 subaccountSchema.statics.encryptConnectionString = function(connectionString) {
   try {
-    const algorithm = 'aes-256-gcm';
+    const algorithm = 'aes-256-cbc';
     const secretKey = crypto.scryptSync(config.encryption.key, 'subaccount-salt', 32);
     const iv = crypto.randomBytes(16);
     
-    const cipher = crypto.createCipher(algorithm, secretKey, iv);
+    const cipher = crypto.createCipheriv(algorithm, secretKey, iv);
     let encrypted = cipher.update(connectionString, 'utf8', 'hex');
     encrypted += cipher.final('hex');
-    
-    const authTag = cipher.getAuthTag();
     
     return {
       encrypted,
       iv: iv.toString('hex'),
-      authTag: authTag.toString('hex')
+      authTag: 'cbc-mode' // CBC doesn't use auth tag, but field is required
     };
   } catch (error) {
     throw new Error('Failed to encrypt connection string: ' + error.message);
@@ -168,11 +166,10 @@ subaccountSchema.statics.encryptConnectionString = function(connectionString) {
 // Static method to decrypt connection string
 subaccountSchema.statics.decryptConnectionString = function(encrypted, iv, authTag) {
   try {
-    const algorithm = 'aes-256-gcm';
+    const algorithm = 'aes-256-cbc';
     const secretKey = crypto.scryptSync(config.encryption.key, 'subaccount-salt', 32);
     
-    const decipher = crypto.createDecipher(algorithm, secretKey, Buffer.from(iv, 'hex'));
-    decipher.setAuthTag(Buffer.from(authTag, 'hex'));
+    const decipher = crypto.createDecipheriv(algorithm, secretKey, Buffer.from(iv, 'hex'));
     
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
