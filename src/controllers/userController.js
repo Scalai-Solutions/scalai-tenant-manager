@@ -3,6 +3,7 @@ const config = require('../../config/config');
 const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
+const authService = require('../services/authService');
 
 // Import models
 const Subaccount = require('../models/Subaccount');
@@ -11,7 +12,7 @@ const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 
 class UserController {
-  // Get subaccount users
+    // Get subaccount users
   static async getSubaccountUsers(req, res, next) {
     try {
       const { subaccountId } = req.params;
@@ -23,6 +24,163 @@ class UserController {
         subaccountId,
         query: req.query
       });
+
+      // Check if user has admin permissions for this subaccount
+      const userSubaccount = await UserSubaccount.findOne({
+        userId,
+        subaccountId,
+        isActive: true
+      });
+
+      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+        return res.status(403).json({
+          success: false,
+          message: 'Admin permissions required to view subaccount users',
+          code: 'INSUFFICIENT_PERMISSIONS'
+        });
+      }
+
+      // Get Redis service instance (dynamic)
+      const redisService = redisManager.getRedisService();
+
+      // Check cache first
+      const cacheKey = `subaccount_users:${subaccountId}:${JSON.stringify(req.query)}`;
+      let cachedData = null;
+      
+      if (redisService && redisService.isConnected) {
+        try {
+          cachedData = await redisService.get(cacheKey);
+        } catch (error) {
+          Logger.warn('Cache get failed, continuing without cache', { error: error.message, cacheKey });
+        }
+      }
+      
+      if (cachedData) {
+        Logger.debug('Returning cached subaccount users', { subaccountId, cacheKey });
+        return res.json({
+          success: true,
+          message: 'Subaccount users retrieved from cache',
+          data: cachedData,
+          cached: true
+        });
+      }
+
+      // Build query
+      const query = { subaccountId, isActive: true };
+      if (role) query.role = role;
+
+      // Get subaccount users WITHOUT populate (since users are in auth server)
+      const skip = (page - 1) * limit;
+      const subaccountUsers = await UserSubaccount.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit));
+
+      // Get total count
+      const total = await UserSubaccount.countDocuments(query);
+
+      // Get JWT token from request
+      const token = req.headers.authorization?.split(' ')[1];
+      
+      // Fetch user details from auth server for each user
+      const usersWithDetails = [];
+      
+      for (const su of subaccountUsers) {
+        try {
+          // Get user details from auth server
+          const userResult = await authService.getUserById(su.userId, token);
+          
+          if (userResult.success) {
+            const user = userResult.user;
+            
+            // Apply status filter if specified
+            if (status && ((status === 'active' && !user.isActive) || (status === 'inactive' && user.isActive))) {
+              continue;
+            }
+            
+            usersWithDetails.push({
+              id: user._id || user.id,
+              firstName: user.firstName,
+              lastName: user.lastName,
+              email: user.email,
+              isActive: user.isActive,
+              lastLogin: user.lastLogin,
+              accountCreatedAt: user.createdAt,
+              
+              // Subaccount-specific data
+              role: su.role,
+              permissions: su.permissions,
+              joinedAt: su.createdAt,
+              lastAccessed: su.lastAccessed,
+              stats: su.stats,
+              invitedBy: su.invitedBy ? {
+                id: su.invitedBy,
+                name: 'Unknown', // We'd need another API call to get inviter details
+                email: 'unknown@example.com'
+              } : null,
+              invitedAt: su.invitedAt,
+              acceptedAt: su.acceptedAt,
+              
+              // Temporary access
+              temporaryAccess: su.temporaryAccess
+            });
+          } else {
+            Logger.warn('Failed to get user details from auth server', {
+              userId: su.userId,
+              error: userResult.message
+            });
+          }
+        } catch (error) {
+          Logger.error('Error fetching user details from auth server', {
+            userId: su.userId,
+            error: error.message
+          });
+        }
+      }
+
+      const result = {
+        users: usersWithDetails,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+
+      // Cache the result for 15 minutes
+      if (redisService && redisService.isConnected) {
+        try {
+          await redisService.set(cacheKey, result, 900);
+        } catch (error) {
+          Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
+        }
+      }
+
+      Logger.info('Subaccount users retrieved', {
+        userId,
+        subaccountId,
+        count: result.users.length,
+        total
+      });
+
+      res.json({
+        success: true,
+        message: 'Subaccount users retrieved successfully',
+        data: result
+      });
+
+    } catch (error) {
+      Logger.error('Get subaccount users error', {
+        error: error.message,
+        stack: error.stack,
+        userId: req.user?.id,
+        subaccountId: req.params?.subaccountId
+      });
+
+      next(error);
+    }
+  
 
       // Check if user has admin permissions for this subaccount
       const userSubaccount = await UserSubaccount.findOne({
@@ -156,7 +314,7 @@ class UserController {
       });
       next(error);
     }
-  }
+  
 
   // Invite user to subaccount
   static async inviteUser(req, res, next) {
