@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
-const redisService = require('../services/redisService');
+const redisManager = require('../services/redisManager');
 const { v4: uuidv4 } = require('uuid');
 
 // JWT token authentication middleware
@@ -24,14 +24,91 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
+    // Add comprehensive token format validation
+    if (!token || typeof token !== 'string' || token.trim() === '') {
+      Logger.security('Empty or invalid token format', 'medium', {
+        tokenType: typeof token,
+        tokenLength: token ? token.length : 0,
+        ip: req.ip
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid token format',
+        code: 'TOKEN_MALFORMED'
+      });
+    }
+
+    // JWT should have exactly 3 parts separated by dots
+    const tokenParts = token.split('.');
+    if (tokenParts.length !== 3) {
+      Logger.security('Malformed JWT token structure', 'medium', {
+        tokenLength: token.length,
+        tokenParts: tokenParts.length,
+        ip: req.ip,
+        tokenPrefix: token.substring(0, Math.min(10, token.length)) + '...'
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: 'Malformed token structure',
+        code: 'TOKEN_MALFORMED'
+      });
+    }
+
+    // Validate each part is base64url encoded (basic check)
+    for (let i = 0; i < tokenParts.length; i++) {
+      if (!tokenParts[i] || tokenParts[i].trim() === '') {
+        Logger.security('Empty JWT token part', 'medium', {
+          partIndex: i,
+          ip: req.ip
+        });
+
+        return res.status(403).json({
+          success: false,
+          message: 'Malformed token structure',
+          code: 'TOKEN_MALFORMED'
+        });
+      }
+    }
+
     // Verify the token
     const decoded = jwt.verify(token, config.jwt.secret);
+    
+    // Validate decoded token structure
+    if (!decoded || typeof decoded !== 'object') {
+      Logger.security('Invalid decoded token structure', 'medium', {
+        decodedType: typeof decoded,
+        ip: req.ip
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid token content',
+        code: 'TOKEN_INVALID'
+      });
+    }
+
+    // Validate required fields in JWT
+    if (!decoded.id || !decoded.email) {
+      Logger.security('Missing required fields in JWT', 'medium', {
+        hasId: !!decoded.id,
+        hasEmail: !!decoded.email,
+        ip: req.ip
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid token content',
+        code: 'TOKEN_INVALID'
+      });
+    }
     
     // Add user info to request
     req.user = {
       id: decoded.id,
       email: decoded.email,
-      role: decoded.role, // Include role from JWT
+      role: decoded.role || 'user', // Default to 'user' if no role specified
       iat: decoded.iat,
       exp: decoded.exp
     };
@@ -51,13 +128,28 @@ const authenticateToken = async (req, res, next) => {
     } else if (error.name === 'JsonWebTokenError') {
       errorCode = 'TOKEN_MALFORMED';
       message = 'Malformed token';
-      Logger.security('Malformed token', 'medium', {
+      Logger.security('JWT verification failed', 'medium', {
+        error: error.message,
+        ip: req.ip
+      });
+    } else if (error.name === 'SyntaxError' && error.message.includes('JSON')) {
+      errorCode = 'TOKEN_MALFORMED';
+      message = 'Invalid token format';
+      Logger.security('Token JSON parsing failed', 'medium', {
+        error: error.message,
+        ip: req.ip
+      });
+    } else if (error.name === 'NotBeforeError') {
+      errorCode = 'TOKEN_NOT_ACTIVE';
+      message = 'Token not active';
+      Logger.security('Token not yet active', 'medium', {
         error: error.message,
         ip: req.ip
       });
     } else {
       Logger.error('Token verification failed', {
         error: error.message,
+        errorName: error.name,
         stack: error.stack,
         ip: req.ip
       });
@@ -146,54 +238,136 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
       // Import UserSubaccount model (avoid circular dependency)
       const UserSubaccount = require('../models/UserSubaccount');
       
-      // Check cache first
-      const cachedPermissions = await redisService.getCachedPermissions(req.user.id, subaccountId);
+      // Get Redis service instance with proper error handling
+      let redisService = null;
+      let cachedPermissions = null;
+      
+      try {
+        redisService = redisManager.getRedisService();
+      } catch (redisManagerError) {
+        Logger.warn('Failed to get Redis service from manager', {
+          error: redisManagerError.message,
+          userId: req.user.id,
+          subaccountId
+        });
+      }
+      
+      // Check cache first (only if Redis is available and connected)
+      if (redisService && redisService.isConnected) {
+        try {
+          cachedPermissions = await redisService.getCachedPermissions(req.user.id, subaccountId);
+          
+          if (cachedPermissions) {
+            Logger.debug('Using cached permissions', {
+              userId: req.user.id,
+              subaccountId,
+              permissions: cachedPermissions
+            });
+          }
+        } catch (redisError) {
+          Logger.warn('Redis cache check failed, continuing without cache', {
+            error: redisError.message,
+            errorName: redisError.name,
+            userId: req.user.id,
+            subaccountId
+          });
+          // Continue without cache - don't fail the request
+          cachedPermissions = null;
+        }
+      } else {
+        Logger.debug('Redis not available, skipping cache check', {
+          hasRedisService: !!redisService,
+          isConnected: redisService ? redisService.isConnected : false,
+          userId: req.user.id,
+          subaccountId
+        });
+      }
+
       let accessResult;
 
       if (cachedPermissions) {
-        Logger.debug('Using cached permissions', {
-          userId: req.user.id,
-          subaccountId,
-          permissions: cachedPermissions
-        });
-
-        // Simulate access check result
+        // Use cached permissions
         accessResult = {
           hasAccess: true,
           permissions: cachedPermissions,
-          role: cachedPermissions.role
+          role: cachedPermissions.role || 'viewer'
         };
       } else {
         // Check database
-        accessResult = await UserSubaccount.hasAccess(
-          req.user.id, 
-          subaccountId, 
-          requiredPermission
-        );
-
-        // Cache the result if access is granted
-        if (accessResult.hasAccess) {
-          await redisService.cachePermissions(
-            req.user.id,
-            subaccountId,
-            accessResult.permissions,
-            3600 // 1 hour
+        try {
+          accessResult = await UserSubaccount.hasAccess(
+            req.user.id, 
+            subaccountId, 
+            requiredPermission
           );
+
+          if (!accessResult) {
+            accessResult = { 
+              hasAccess: false, 
+              reason: 'Access check returned null result' 
+            };
+          }
+        } catch (dbError) {
+          Logger.error('Database access check failed', {
+            error: dbError.message,
+            stack: dbError.stack,
+            userId: req.user.id,
+            subaccountId,
+            requiredPermission
+          });
+
+          return res.status(500).json({
+            success: false,
+            message: 'Database access check failed',
+            code: 'DATABASE_ERROR'
+          });
+        }
+
+        // Cache the result if access is granted and Redis is available
+        if (accessResult.hasAccess && redisService && redisService.isConnected) {
+          try {
+            await redisService.cachePermissions(
+              req.user.id,
+              subaccountId,
+              accessResult.permissions,
+              3600 // 1 hour
+            );
+            
+            Logger.debug('Cached permissions for future use', {
+              userId: req.user.id,
+              subaccountId
+            });
+          } catch (cacheError) {
+            Logger.warn('Failed to cache permissions', {
+              error: cacheError.message,
+              errorName: cacheError.name,
+              userId: req.user.id,
+              subaccountId
+            });
+            // Don't fail the request if caching fails
+          }
         }
       }
 
       if (!accessResult.hasAccess) {
         Logger.security('Subaccount access denied', 'medium', {
           userId: req.user.id,
+          userEmail: req.user.email,
           subaccountId,
           requiredPermission,
-          reason: accessResult.reason
+          reason: accessResult.reason,
+          endpoint: req.originalUrl,
+          clientIP: req.ip
         });
 
         return res.status(403).json({
           success: false,
           message: accessResult.reason || 'Access denied to subaccount',
-          code: 'SUBACCOUNT_ACCESS_DENIED'
+          code: 'SUBACCOUNT_ACCESS_DENIED',
+          details: {
+            subaccountId,
+            requiredPermission
+          }
         });
       }
 
@@ -201,23 +375,27 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
       req.subaccount = {
         id: subaccountId,
         permissions: accessResult.permissions,
-        role: accessResult.role
+        role: accessResult.role || 'viewer'
       };
 
       Logger.debug('Subaccount access granted', {
         userId: req.user.id,
         subaccountId,
         role: accessResult.role,
-        permission: requiredPermission
+        permission: requiredPermission,
+        fromCache: !!cachedPermissions
       });
 
       next();
     } catch (error) {
       Logger.error('Subaccount access validation failed', {
         error: error.message,
+        errorName: error.name,
         stack: error.stack,
         userId: req.user?.id,
-        subaccountId: req.params.subaccountId || req.body.subaccountId
+        userEmail: req.user?.email,
+        subaccountId: req.params.subaccountId || req.body.subaccountId,
+        endpoint: req.originalUrl
       });
 
       return res.status(500).json({
