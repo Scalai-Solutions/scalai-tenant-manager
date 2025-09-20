@@ -352,8 +352,8 @@ class SubaccountController {
         });
       }
 
-      // Use transaction for atomic operation
-      const result = await Database.withTransaction(async (session) => {
+      // Create subaccount (simplified without transaction for now)
+      try {
         // Create subaccount
         const subaccount = new Subaccount({
           name,
@@ -371,78 +371,94 @@ class SubaccountController {
           }
         });
 
-        await subaccount.save({ session });
-
-        // Test connection before proceeding (skip for now to avoid connection issues)
-        // const connectionTest = await subaccount.testConnection();
-        // if (!connectionTest.success) {
-        //   throw new Error(`Connection test failed: ${connectionTest.message}`);
-        // }
+        await subaccount.save();
+        console.log('[DEBUG] Subaccount saved with ID:', subaccount._id);
 
         // Create user-subaccount relationship with owner permissions
         const userSubaccount = new UserSubaccount({
           userId,
           subaccountId: subaccount._id,
           role: 'owner',
+          permissions: {
+            read: true,
+            write: true,
+            delete: true,
+            admin: true
+          },
           invitedBy: userId,
           invitedAt: new Date(),
           acceptedAt: new Date()
         });
 
-        await userSubaccount.save({ session });
+        await userSubaccount.save();
+        console.log('[DEBUG] UserSubaccount relationship created');
 
         // Update user subaccount count
         await User.findByIdAndUpdate(
           userId,
-          { $inc: { subaccountCount: 1 } },
-          { session }
+          { $inc: { subaccountCount: 1 } }
         );
+        console.log('[DEBUG] User subaccount count updated');
 
-        return { subaccount, userSubaccount };
-      });
+        const result = { subaccount, userSubaccount };
 
-      // Validate transaction result
-      if (!result || !result.subaccount) {
-        throw new Error('Transaction failed - subaccount not created');
-      }
-
-      // Invalidate user cache
-      if (redisService && redisService.isConnected) {
-        try {
-          await redisService.invalidateUserSubaccounts(userId);
-        } catch (cacheError) {
-          Logger.warn('Failed to invalidate cache', { error: cacheError.message });
+        // Invalidate user cache
+        if (redisService && redisService.isConnected) {
+          try {
+            await redisService.invalidateUserSubaccounts(userId);
+          } catch (cacheError) {
+            Logger.warn('Failed to invalidate cache', { error: cacheError.message });
+          }
         }
+
+        Logger.info('Subaccount created successfully', {
+          userId,
+          subaccountId: result.subaccount._id,
+          name,
+          databaseName,
+          allowedCollections
+        });
+
+        // Return sanitized response
+        const response = {
+          id: result.subaccount._id,
+          name: result.subaccount.name,
+          description: result.subaccount.description,
+          databaseName: result.subaccount.databaseName,
+          isActive: result.subaccount.isActive,
+          maxConnections: result.subaccount.maxConnections,
+          enforceSchema: result.subaccount.enforceSchema,
+          allowedCollections: result.subaccount.allowedCollections,
+          rateLimits: result.subaccount.rateLimits,
+          createdAt: result.subaccount.createdAt,
+          role: result.userSubaccount.role,
+          permissions: result.userSubaccount.permissions
+        };
+
+        res.status(201).json({
+          success: true,
+          message: 'Subaccount created successfully',
+          data: response
+        });
+
+      } catch (error) {
+        Logger.error('Failed to create subaccount', {
+          error: error.message,
+          stack: error.stack,
+          userId: req.user?.id,
+          name: req.body?.name
+        });
+        
+        if (error.code === 11000) {
+          return res.status(400).json({
+            success: false,
+            message: 'Subaccount name already exists',
+            code: 'DUPLICATE_NAME'
+          });
+        }
+        
+        next(error);
       }
-
-      Logger.info('Subaccount created successfully', {
-        userId,
-        subaccountId: result.subaccount._id,
-        name,
-        databaseName
-      });
-
-      // Return sanitized response
-      const response = {
-        id: result.subaccount._id,
-        name: result.subaccount.name,
-        description: result.subaccount.description,
-        databaseName: result.subaccount.databaseName,
-        isActive: result.subaccount.isActive,
-        maxConnections: result.subaccount.maxConnections,
-        enforceSchema: result.subaccount.enforceSchema,
-        allowedCollections: result.subaccount.allowedCollections,
-        rateLimits: result.subaccount.rateLimits,
-        createdAt: result.subaccount.createdAt,
-        role: result.userSubaccount.role,
-        permissions: result.userSubaccount.permissions
-      };
-
-      res.status(201).json({
-        success: true,
-        message: 'Subaccount created successfully',
-        data: response
-      });
 
     } catch (error) {
       Logger.error('Failed to create subaccount', {
