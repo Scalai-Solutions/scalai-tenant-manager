@@ -21,6 +21,9 @@ const errorHandler = require('./middleware/errorHandler');
 // Create Express app
 const app = express();
 
+// Trust proxy for accurate IP addresses (required for Heroku)
+app.set('trust proxy', 1);
+
 // Initialize monitoring (simplified for now)
 // const healthService = new HealthService('tenant-manager');
 // const metricsCollector = new MetricsCollector('tenant-manager');

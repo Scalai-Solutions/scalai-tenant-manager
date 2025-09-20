@@ -331,7 +331,7 @@ class SubaccountController {
       }
 
       // Validate MongoDB URL format and allowed hosts
-      if (!this.validateMongoUrl(mongodbUrl)) {
+      if (!SubaccountController.validateMongoUrl(mongodbUrl)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid MongoDB URL format',
@@ -339,10 +339,10 @@ class SubaccountController {
         });
       }
 
-      if (!this.isHostAllowed(mongodbUrl)) {
+      if (!SubaccountController.isHostAllowed(mongodbUrl)) {
         Logger.security('Unauthorized MongoDB host', 'high', {
           userId,
-          mongodbUrl: this.maskConnectionString(mongodbUrl)
+          mongodbUrl: SubaccountController.maskConnectionString(mongodbUrl)
         });
 
         return res.status(403).json({
