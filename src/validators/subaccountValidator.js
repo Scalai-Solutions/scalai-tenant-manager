@@ -68,22 +68,22 @@ const createSubaccountSchema = Joi.object({
           'any.only': 'Wildcard must be exactly "*" to allow all collections'
         }),
         // Specific collection configuration
-        Joi.object({
-          name: Joi.string()
-            .trim()
-            .pattern(/^[a-zA-Z0-9_-]+$/)
-            .required()
-            .messages({
-              'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
-            }),
-          schema: Joi.object().default({}),
-          permissions: Joi.object({
-            read: Joi.boolean().default(true),
-            write: Joi.boolean().default(true),
-            delete: Joi.boolean().default(false)
-          }).default()
-        })
-      )
+      Joi.object({
+        name: Joi.string()
+          .trim()
+          .pattern(/^[a-zA-Z0-9_-]+$/)
+          .required()
+          .messages({
+            'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
+          }),
+        schema: Joi.object().default({}),
+        permissions: Joi.object({
+          read: Joi.boolean().default(true),
+          write: Joi.boolean().default(true),
+          delete: Joi.boolean().default(false)
+        }).default()
+      })
+    )
     )
     .default([])
     .custom((value, helpers) => {
@@ -172,21 +172,21 @@ const updateSubaccountSchema = Joi.object({
           'any.only': 'Wildcard must be exactly "*" to allow all collections'
         }),
         // Specific collection configuration
-        Joi.object({
-          name: Joi.string()
-            .trim()
-            .pattern(/^[a-zA-Z0-9_-]+$/)
-            .required()
-            .messages({
-              'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
-            }),
-          schema: Joi.object().default({}),
-          permissions: Joi.object({
-            read: Joi.boolean().default(true),
-            write: Joi.boolean().default(true),
-            delete: Joi.boolean().default(false)
-          }).default()
-        })
+      Joi.object({
+        name: Joi.string()
+          .trim()
+          .pattern(/^[a-zA-Z0-9_-]+$/)
+          .required()
+          .messages({
+            'string.pattern.base': 'Collection name can only contain letters, numbers, underscores, and hyphens'
+          }),
+        schema: Joi.object().default({}),
+        permissions: Joi.object({
+          read: Joi.boolean().default(true),
+          write: Joi.boolean().default(true),
+          delete: Joi.boolean().default(false)
+        }).default()
+      })
       )
     )
     .messages({
