@@ -27,13 +27,13 @@ const subaccountSchema = new mongoose.Schema({
   // Encryption metadata
   encryptionIV: {
     type: String,
-    required: true,
+    required: false, // Generated automatically in pre-save
     select: false
   },
   
   encryptionAuthTag: {
     type: String,
-    required: true,
+    required: false, // Generated automatically in pre-save
     select: false
   },
   
@@ -195,13 +195,17 @@ subaccountSchema.methods.getDecryptedUrl = function() {
 
 // Pre-save middleware to encrypt connection string
 subaccountSchema.pre('save', function(next) {
-  if (this.isModified('mongodbUrl') && !this.encryptionIV) {
+  // Always encrypt mongodbUrl if it's present and not already encrypted
+  if (this.mongodbUrl && (!this.encryptionIV || !this.encryptionAuthTag)) {
     try {
+      console.log('[DEBUG] Encrypting MongoDB URL...');
       const encryptionResult = this.constructor.encryptConnectionString(this.mongodbUrl);
       this.mongodbUrl = encryptionResult.encrypted;
       this.encryptionIV = encryptionResult.iv;
       this.encryptionAuthTag = encryptionResult.authTag;
+      console.log('[DEBUG] MongoDB URL encrypted successfully');
     } catch (error) {
+      console.log('[DEBUG] Encryption failed:', error.message);
       return next(error);
     }
   }
