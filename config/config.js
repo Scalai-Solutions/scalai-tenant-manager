@@ -53,6 +53,13 @@ const config = {
     timeout: 30000
   },
   
+  // Webhook server configuration
+  webhookServer: {
+    url: process.env.WEBHOOK_SERVER_URL || 'http://localhost:3004',
+    serviceToken: process.env.WEBHOOK_SERVER_SERVICE_TOKEN,
+    timeout: 10000
+  },
+  
   cors: {
     origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
     credentials: true
@@ -121,6 +128,12 @@ const config = {
       maxSize: '20m',
       maxFiles: '14d'
     }
+  },
+
+  // Service token for service-to-service communication
+  serviceToken: {
+    token: process.env.TENANT_MANAGER_SERVICE_TOKEN,
+    authServerUrl: process.env.AUTH_SERVER_URL || 'http://localhost:3001'
   }
 };
 

@@ -143,6 +143,23 @@ userSubaccountSchema.index({ 'temporaryAccess.expiresAt': 1 }, {
 // Static method to check if user has access to subaccount
 userSubaccountSchema.statics.hasAccess = async function(userId, subaccountId, operation = 'read') {
   try {
+    // First, check if the user is a super_admin or admin - they have access to all subaccounts
+    const User = require('./User');
+    const user = await User.findById(userId);
+    
+    if (user && (user.role === 'super_admin' || user.role === 'admin')) {
+      return {
+        hasAccess: true,
+        permissions: {
+          read: true,
+          write: true,
+          delete: true,
+          admin: true
+        },
+        role: user.role === 'super_admin' ? 'super_admin' : 'admin'
+      };
+    }
+
     const userSubaccount = await this.findOne({
       userId,
       subaccountId,

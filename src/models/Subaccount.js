@@ -99,6 +99,42 @@ const subaccountSchema = new mongoose.Schema({
     required: true
   },
   
+  // Reference to Retell account
+  retellAccountId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'RetellAccount',
+    required: false
+  },
+  
+  // Activated connectors with their configurations
+  activatedConnectors: [{
+    connectorId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Connector',
+      required: true
+    },
+    // Override or extend the base connector config for this specific subaccount
+    config: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
+    },
+    // When this connector was activated for this subaccount
+    activatedAt: {
+      type: Date,
+      default: Date.now
+    },
+    // Connector status for this subaccount
+    isActive: {
+      type: Boolean,
+      default: true
+    },
+    // Who activated this connector
+    activatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }
+  }],
+  
   // Usage statistics
   stats: {
     totalQueries: { type: Number, default: 0 },
@@ -141,6 +177,8 @@ const subaccountSchema = new mongoose.Schema({
 subaccountSchema.index({ createdBy: 1 });
 subaccountSchema.index({ isActive: 1 });
 subaccountSchema.index({ name: 1, createdBy: 1 });
+subaccountSchema.index({ 'activatedConnectors.connectorId': 1 });
+subaccountSchema.index({ 'activatedConnectors.isActive': 1 });
 
 // Static method to encrypt connection string
 subaccountSchema.statics.encryptConnectionString = function(connectionString) {
@@ -260,6 +298,65 @@ subaccountSchema.methods.testConnection = async function() {
       }
     }
   }
+};
+
+// Instance method to activate a connector
+subaccountSchema.methods.activateConnector = function(connectorId, config = {}, activatedBy) {
+  // Check if connector is already activated
+  const existing = this.activatedConnectors.find(
+    ac => ac.connectorId.toString() === connectorId.toString()
+  );
+  
+  if (existing) {
+    // Update existing connector
+    existing.config = { ...existing.config, ...config };
+    existing.isActive = true;
+    existing.activatedAt = new Date();
+    if (activatedBy) existing.activatedBy = activatedBy;
+  } else {
+    // Add new connector
+    this.activatedConnectors.push({
+      connectorId,
+      config,
+      activatedAt: new Date(),
+      isActive: true,
+      activatedBy
+    });
+  }
+  
+  return this.save();
+};
+
+// Instance method to deactivate a connector
+subaccountSchema.methods.deactivateConnector = function(connectorId) {
+  const connector = this.activatedConnectors.find(
+    ac => ac.connectorId.toString() === connectorId.toString()
+  );
+  
+  if (connector) {
+    connector.isActive = false;
+  }
+  
+  return this.save();
+};
+
+// Instance method to get active connectors
+subaccountSchema.methods.getActiveConnectors = function() {
+  return this.activatedConnectors.filter(ac => ac.isActive);
+};
+
+// Instance method to update connector config
+subaccountSchema.methods.updateConnectorConfig = function(connectorId, config) {
+  const connector = this.activatedConnectors.find(
+    ac => ac.connectorId.toString() === connectorId.toString()
+  );
+  
+  if (connector) {
+    connector.config = { ...connector.config, ...config };
+    return this.save();
+  }
+  
+  throw new Error('Connector not found in subaccount');
 };
 
 // Instance method to update stats

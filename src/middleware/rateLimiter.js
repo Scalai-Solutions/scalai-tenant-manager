@@ -5,6 +5,15 @@ const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const MemoryRateLimitStore = require('./memoryStore');
 
+// IPv6-compatible key generator helper
+const createKeyGenerator = (prefix = '') => {
+  return (req) => {
+    // Use the built-in IP key generator for IPv6 compatibility
+    const ip = req.ip || req.connection.remoteAddress || req.socket.remoteAddress;
+    return prefix ? `${prefix}${ip}` : ip;
+  };
+};
+
 // Hybrid rate limit store that uses Redis when available, memory as fallback
 class HybridRateLimitStore {
   constructor(options = {}) {
@@ -111,10 +120,7 @@ const generalLimiter = rateLimit({
     prefix: 'general:',
     windowMs: config.rateLimiting.windowMs
   }),
-  keyGenerator: (req) => {
-    // Use IP address as default key
-    return req.ip;
-  },
+  // Remove custom keyGenerator to use default IPv6-compatible one
   handler: (req, res) => {
     Logger.security('Rate limit exceeded', 'medium', {
       ip: req.ip,
@@ -143,8 +149,8 @@ const userLimiter = rateLimit({
     windowMs: config.rateLimiting.perUser.windowMs
   }),
   keyGenerator: (req) => {
-    // Use user ID if authenticated, otherwise IP
-    return req.user ? `user:${req.user.id}` : `ip:${req.ip}`;
+    // Use user ID if authenticated, otherwise use default IP handling
+    return req.user ? `user:${req.user.id}` : req.ip;
   },
   skip: (req) => {
     // Skip rate limiting for super admins
@@ -178,7 +184,7 @@ const adminLimiter = rateLimit({
     windowMs: config.rateLimiting.admin.windowMs
   }),
   keyGenerator: (req) => {
-    return req.user ? `admin:${req.user.id}` : `ip:${req.ip}`;
+    return req.user ? `admin:${req.user.id}` : req.ip;
   },
   handler: (req, res) => {
     Logger.security('Admin rate limit exceeded', 'high', {
@@ -206,10 +212,8 @@ const speedLimiter = slowDown({
   store: new HybridRateLimitStore({
     prefix: 'slow:',
     windowMs: 60 * 1000
-  }),
-  keyGenerator: (req) => {
-    return req.user ? `user:${req.user.id}` : `ip:${req.ip}`;
-  }
+  })
+  // Remove custom keyGenerator to use default IPv6-compatible one
 });
 
 // Subaccount-specific rate limiter
@@ -291,8 +295,8 @@ const loginLimiter = createRateLimiter({
   prefix: 'login:',
   type: 'login_attempts',
   message: 'Too many login attempts, please try again later',
-  code: 'LOGIN_RATE_LIMIT_EXCEEDED',
-  keyGenerator: (req) => `login:${req.ip}`
+  code: 'LOGIN_RATE_LIMIT_EXCEEDED'
+  // Use default keyGenerator for IPv6 compatibility
 });
 
 // Password reset limiter
@@ -302,8 +306,8 @@ const passwordResetLimiter = createRateLimiter({
   prefix: 'password_reset:',
   type: 'password_reset',
   message: 'Too many password reset attempts',
-  code: 'PASSWORD_RESET_RATE_LIMIT_EXCEEDED',
-  keyGenerator: (req) => `reset:${req.ip}`
+  code: 'PASSWORD_RESET_RATE_LIMIT_EXCEEDED'
+  // Use default keyGenerator for IPv6 compatibility
 });
 
 // Dynamic rate limiter based on user role
@@ -331,7 +335,7 @@ const dynamicUserLimiter = (req, res, next) => {
     max: maxRequests,
     prefix: 'dynamic:',
     type: 'dynamic_user',
-    keyGenerator: (req) => req.user ? `user:${req.user.id}` : `ip:${req.ip}`
+    keyGenerator: (req) => req.user ? `user:${req.user.id}` : req.ip
   });
 
   limiter(req, res, next);

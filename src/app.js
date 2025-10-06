@@ -8,6 +8,7 @@ const config = require('../config/config');
 // Import routes
 const subaccountRoutes = require('./routes/subaccountRoutes');
 const userRoutes = require('./routes/userRoutes');
+const connectorRoutes = require('./routes/connectorRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 
 // Import middleware
@@ -88,6 +89,7 @@ app.use('/api', healthRoutes);
 
 // API routes
 app.use('/api/subaccounts', subaccountRoutes);
+app.use('/api/connectors', connectorRoutes);
 app.use('/api', userRoutes);
 
 // Root endpoint

@@ -3,16 +3,18 @@ const config = require('../../config/config');
 const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
+const webhookService = require('../services/webhookService');
 
 // Import models
 const Subaccount = require('../models/Subaccount');
 const UserSubaccount = require('../models/UserSubaccount');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const Connector = require('../models/Connector');
 
 class SubaccountController {
   // Get user's subaccounts with caching
-  static async getUserSubaccounts(req, res, next) {
+static async getUserSubaccounts(req, res, next) {
     const startTime = Date.now();
     
     try {
@@ -70,7 +72,11 @@ class SubaccountController {
               .populate({
                 path: 'subaccountId',
                 match: status ? { isActive: status === 'active' } : {},
-                select: 'name description isActive stats createdAt maintenanceMode rateLimits'
+                select: 'name description isActive stats createdAt maintenanceMode rateLimits activatedConnectors',
+                populate: {
+                  path: 'activatedConnectors.connectorId',
+                  select: 'type name icon category'
+                }
               })
               .sort({ createdAt: -1 })
               .skip(skip)
@@ -106,7 +112,15 @@ class SubaccountController {
             rateLimits: us.subaccountId.rateLimits,
             joinedAt: us.createdAt,
             lastAccessed: us.lastAccessed,
-            userStats: us.stats
+            userStats: us.stats,
+            activatedConnectors: us.subaccountId.activatedConnectors
+              .filter(ac => ac.connectorId && ac.isActive)
+              .map(ac => ({
+                type: ac.connectorId.type,
+                name: ac.connectorId.name,
+                icon: ac.connectorId.icon,
+                category: ac.connectorId.category
+              }))
           })),
           pagination: {
             page: parseInt(page),
@@ -179,45 +193,99 @@ class SubaccountController {
   static async getSubaccount(req, res, next) {
     try {
       const { subaccountId } = req.params;
-      const userId = req.user.id;
+      
+      // Handle both service tokens and user tokens
+      const isServiceRequest = !!req.service;
+      const userId = req.user?.id || null;
+      const serviceName = req.service?.serviceName || null;
 
       Logger.audit('Get subaccount details', 'subaccounts', {
         userId,
-        subaccountId
+        serviceName,
+        subaccountId,
+        isServiceRequest
       });
+
+      // Check if this is a service request or specific conditions
+      const needsMongoUrl = isServiceRequest || 
+                           req.headers['x-service-name'] === 'database-server' || 
+                           req.headers['user-agent']?.includes('axios') ||
+                           req.user?.role === 'super_admin';
 
       // Get Redis service instance (dynamic)
       const redisService = redisManager.getRedisService();
 
-      // Check cache first
-      const cachedSubaccount = await redisService.getCachedSubaccount(subaccountId);
-      if (cachedSubaccount) {
-        Logger.debug('Returning cached subaccount', { subaccountId });
-        return res.json({
-          success: true,
-          message: 'Subaccount retrieved from cache',
-          data: cachedSubaccount,
-          cached: true
-        });
+      // For service requests, we need fresh data with MongoDB URL
+      let cachedSubaccount = null;
+      if (!needsMongoUrl) {
+        // Check cache first for regular user requests
+        cachedSubaccount = await redisService.getCachedSubaccount(subaccountId);
+        if (cachedSubaccount) {
+          Logger.debug('Returning cached subaccount', { subaccountId });
+          return res.json({
+            success: true,
+            message: 'Subaccount retrieved from cache',
+            data: cachedSubaccount,
+            cached: true
+          });
+        }
       }
 
-      // Get user's access to this subaccount
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
+      // Check if user has access (middleware should have already validated this)
+      // Handle both service requests and user requests
+      let userSubaccount = null;
+      let userRole = 'viewer';
+      
+      if (isServiceRequest) {
+        // Service requests have already been validated by middleware
+        userRole = 'service';
+      } else if (req.user?.role === 'super_admin' || req.user?.role === 'admin') {
+        // Admin users have full access, use the role from middleware
+        userRole = req.subaccount?.role || req.user.role;
+      } else if (req.user) {
+        // Regular users need to have a UserSubaccount record
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
+        });
 
-      if (!userSubaccount) {
-        return res.status(403).json({
+        if (!userSubaccount) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied to subaccount',
+            code: 'SUBACCOUNT_ACCESS_DENIED'
+          });
+        }
+        
+        userRole = userSubaccount.role;
+      } else {
+        return res.status(401).json({
           success: false,
-          message: 'Access denied to subaccount',
-          code: 'SUBACCOUNT_ACCESS_DENIED'
+          message: 'Authentication required',
+          code: 'AUTH_REQUIRED'
         });
       }
 
-      // Get subaccount details
-      const subaccount = await Subaccount.findById(subaccountId);
+      // Get subaccount details - include encrypted fields for service requests
+      let subaccount;
+      if (needsMongoUrl) {
+        // For service requests, we need the encrypted fields to decrypt the URL
+        subaccount = await Subaccount.findById(subaccountId)
+          .select('+mongodbUrl +encryptionIV +encryptionAuthTag')
+          .populate('retellAccountId', 'accountName isActive verificationStatus lastVerified')
+          .populate({
+            path: 'activatedConnectors.connectorId',
+            select: 'type name description icon category version isActive'
+          });
+      } else {
+        subaccount = await Subaccount.findById(subaccountId)
+          .populate('retellAccountId', 'accountName isActive verificationStatus lastVerified')
+          .populate({
+            path: 'activatedConnectors.connectorId',
+            select: 'type name description icon category version isActive'
+          });
+      }
       
       if (!subaccount) {
         return res.status(404).json({
@@ -252,21 +320,72 @@ class SubaccountController {
         createdAt: subaccount.createdAt,
         updatedAt: subaccount.updatedAt,
         
+        // Retell account info
+        retellAccount: subaccount.retellAccountId ? {
+          id: subaccount.retellAccountId._id,
+          accountName: subaccount.retellAccountId.accountName,
+          isActive: subaccount.retellAccountId.isActive,
+          verificationStatus: subaccount.retellAccountId.verificationStatus,
+          lastVerified: subaccount.retellAccountId.lastVerified
+        } : null,
+        
+        // Activated connectors (without sensitive config)
+        activatedConnectors: subaccount.activatedConnectors
+          .filter(ac => ac.connectorId) // Filter out any null/undefined connectors
+          .map(ac => ({
+            id: ac._id,
+            type: ac.connectorId.type,
+            name: ac.connectorId.name,
+            description: ac.connectorId.description,
+            icon: ac.connectorId.icon,
+            category: ac.connectorId.category,
+            version: ac.connectorId.version,
+            isActive: ac.isActive,
+            activatedAt: ac.activatedAt,
+            connectorBaseActive: ac.connectorId.isActive // Base connector status
+          })),
+        
         // User-specific data
-        userRole: userSubaccount.role,
-        userPermissions: userSubaccount.permissions,
-        userStats: userSubaccount.stats,
-        joinedAt: userSubaccount.createdAt,
-        lastAccessed: userSubaccount.lastAccessed
+        userRole: userRole,
+        userPermissions: userSubaccount ? userSubaccount.permissions : (req.subaccount?.permissions || {
+          read: true,
+          write: true,
+          delete: true,
+          admin: true
+        }),
+        userStats: userSubaccount ? userSubaccount.stats : {
+          totalQueries: 0,
+          totalDocumentsRead: 0,
+          totalDocumentsWritten: 0,
+          avgResponseTime: 0
+        },
+        joinedAt: userSubaccount ? userSubaccount.createdAt : null,
+        lastAccessed: userSubaccount ? userSubaccount.lastAccessed : null
       };
 
-      // Cache the result
-      await redisService.cacheSubaccount(subaccountId, result, 3600);
+      // Include encrypted MongoDB URL and decryption data for service requests
+      if (needsMongoUrl && subaccount.mongodbUrl) {
+        result.mongodbUrl = subaccount.mongodbUrl; // Keep encrypted
+        result.encryptionIV = subaccount.encryptionIV;
+        result.encryptionAuthTag = subaccount.encryptionAuthTag;
+        Logger.debug('MongoDB URL encryption data provided for service request', { 
+          subaccountId, 
+          serviceName: serviceName || 'unknown' 
+        });
+      }
+
+      // Cache the result (without MongoDB URL for security)
+      if (!needsMongoUrl) {
+        await redisService.cacheSubaccount(subaccountId, result, 3600);
+      }
 
       Logger.info('Subaccount details retrieved', {
         userId,
+        serviceName,
         subaccountId,
-        role: userSubaccount.role
+        role: userRole,
+        isServiceRequest,
+        includesMongoUrl: needsMongoUrl && !!result.mongodbUrl
       });
 
       res.json({
@@ -280,6 +399,8 @@ class SubaccountController {
         error: error.message,
         stack: error.stack,
         userId: req.user?.id,
+        serviceName: req.service?.serviceName,
+        isServiceRequest: !!req.service,
         subaccountId: req.params.subaccountId
       });
       next(error);
@@ -732,6 +853,165 @@ class SubaccountController {
 
     } catch (error) {
       Logger.error('Connection test failed', {
+        error: error.message,
+        stack: error.stack,
+        userId: req.user?.id,
+        subaccountId: req.params.subaccountId
+      });
+      next(error);
+    }
+  }
+
+  // Invite email for calendar integration
+  static async inviteEmailForCalendar(req, res, next) {
+    try {
+      const { subaccountId } = req.params;
+      const { userEmail } = req.body;
+      const userId = req.user?.id;
+
+      if (!userEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'User email is required',
+          code: 'EMAIL_REQUIRED'
+        });
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(userEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format',
+          code: 'INVALID_EMAIL'
+        });
+      }
+
+      Logger.audit('Invite email for calendar integration', 'calendar_integration', {
+        userId,
+        subaccountId,
+        userEmail
+      });
+
+      // Verify subaccount exists
+      const subaccount = await Subaccount.findById(subaccountId);
+      if (!subaccount) {
+        return res.status(404).json({
+          success: false,
+          message: 'Subaccount not found',
+          code: 'SUBACCOUNT_NOT_FOUND'
+        });
+      }
+
+      if (!subaccount.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: 'Subaccount is not active',
+          code: 'SUBACCOUNT_INACTIVE'
+        });
+      }
+
+      // Call webhook service to invite email
+      const inviteResult = await webhookService.inviteEmailForCalendarIntegration(
+        subaccountId,
+        userEmail
+      );
+
+      if (inviteResult.success) {
+        Logger.info('Email invited for calendar integration', {
+          userId,
+          subaccountId,
+          userEmail,
+          authUrl: inviteResult.authUrl
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: inviteResult.message || 'Email invited successfully',
+          data: {
+            authUrl: inviteResult.authUrl,
+            userEmail
+          }
+        });
+      } else {
+        Logger.warn('Failed to invite email for calendar integration', {
+          userId,
+          subaccountId,
+          userEmail,
+          message: inviteResult.message
+        });
+
+        return res.status(400).json({
+          success: false,
+          message: inviteResult.message || 'Failed to invite email',
+          code: 'INVITATION_FAILED'
+        });
+      }
+
+    } catch (error) {
+      Logger.error('Failed to invite email for calendar integration', {
+        error: error.message,
+        stack: error.stack,
+        userId: req.user?.id,
+        subaccountId: req.params.subaccountId
+      });
+      next(error);
+    }
+  }
+
+  // Invalidate subaccount cache
+  static async invalidateCache(req, res, next) {
+    try {
+      const { subaccountId } = req.params;
+      const userId = req.user?.id;
+
+      Logger.audit('Invalidate subaccount cache', 'cache', {
+        userId,
+        subaccountId
+      });
+
+      // Get Redis service instance
+      const redisService = redisManager.getRedisService();
+
+      if (!redisService || !redisService.isConnected) {
+        return res.status(503).json({
+          success: false,
+          message: 'Cache service unavailable',
+          code: 'CACHE_UNAVAILABLE'
+        });
+      }
+
+      // Invalidate the subaccount cache
+      await redisService.invalidateSubaccount(subaccountId);
+
+      // Also invalidate user subaccounts cache if userId is available
+      if (userId) {
+        try {
+          await redisService.invalidateUserSubaccounts(userId);
+        } catch (error) {
+          Logger.warn('Failed to invalidate user subaccounts cache', {
+            userId,
+            error: error.message
+          });
+        }
+      }
+
+      Logger.info('Subaccount cache invalidated', {
+        userId,
+        subaccountId
+      });
+
+      res.json({
+        success: true,
+        message: 'Cache invalidated successfully',
+        data: {
+          subaccountId,
+          invalidatedAt: new Date()
+        }
+      });
+
+    } catch (error) {
+      Logger.error('Failed to invalidate cache', {
         error: error.message,
         stack: error.stack,
         userId: req.user?.id,

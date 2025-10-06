@@ -235,6 +235,29 @@ const validateSubaccountAccess = (requiredPermission = 'read') => {
         });
       }
 
+      // Super admin and admin users have access to all subaccounts
+      if (req.user.role === 'super_admin' || req.user.role === 'admin') {
+        req.subaccount = {
+          id: subaccountId,
+          permissions: {
+            read: true,
+            write: true,
+            delete: true,
+            admin: true
+          },
+          role: req.user.role === 'super_admin' ? 'super_admin' : 'admin'
+        };
+
+        Logger.debug('Admin/Super admin access granted', {
+          userId: req.user.id,
+          userRole: req.user.role,
+          subaccountId,
+          permission: requiredPermission
+        });
+
+        return next();
+      }
+
       // Import UserSubaccount model (avoid circular dependency)
       const UserSubaccount = require('../models/UserSubaccount');
       

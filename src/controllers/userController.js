@@ -16,7 +16,14 @@ class UserController {
   static async getSubaccountUsers(req, res, next) {
     try {
       const { subaccountId } = req.params;
-      const userId = req.user.id;
+      let userId = null;
+      if(req.user){
+        userId = req.user.id;
+      }else if(req.serviceUserId){
+        // X-User-ID captured from service auth middleware
+        userId = req.serviceUserId;
+      }
+      
       const { page = 1, limit = 20, role, status } = req.query;
 
       Logger.audit('Get subaccount users', 'users', {
@@ -78,7 +85,7 @@ class UserController {
 
       // Get total count
       const total = await UserSubaccount.countDocuments(query);
-
+      console.log(req.headers)
       // Get JWT token from request
       const token = req.headers.authorization?.split(' ')[1];
       
@@ -180,141 +187,7 @@ class UserController {
 
       next(error);
     }
-  
-
-      // Check if user has admin permissions for this subaccount
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
-
-      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to view subaccount users',
-          code: 'INSUFFICIENT_PERMISSIONS'
-        });
-      }
-
-      // Get Redis service instance (dynamic)
-      const redisService = redisManager.getRedisService();
-
-      // Check cache first
-      const cacheKey = `subaccount_users:${subaccountId}:${JSON.stringify(req.query)}`;
-      let cachedData = null;
-      
-      if (redisService && redisService.isConnected) {
-        try {
-          cachedData = await redisService.get(cacheKey);
-        } catch (error) {
-          Logger.warn('Cache get failed, continuing without cache', { error: error.message, cacheKey });
-        }
-      }
-      
-      if (cachedData) {
-        Logger.debug('Returning cached subaccount users', { subaccountId, cacheKey });
-        return res.json({
-          success: true,
-          message: 'Subaccount users retrieved from cache',
-          data: cachedData,
-          cached: true
-        });
-      }
-
-      // Build query
-      const query = { subaccountId, isActive: true };
-      if (role) query.role = role;
-
-      // Get subaccount users with pagination
-      const skip = (page - 1) * limit;
-      const subaccountUsers = await UserSubaccount.find(query)
-        .populate({
-          path: 'userId',
-          select: 'firstName lastName email lastLogin isActive createdAt',
-          match: status ? { isActive: status === 'active' } : {}
-        })
-        .populate({
-          path: 'invitedBy',
-          select: 'firstName lastName email'
-        })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit));
-
-      // Filter out null users (from populate match)
-      const validUsers = subaccountUsers.filter(su => su.userId);
-
-      // Get total count
-      const total = await UserSubaccount.countDocuments(query);
-
-      const result = {
-        users: validUsers.map(su => ({
-          id: su.userId._id,
-          firstName: su.userId.firstName,
-          lastName: su.userId.lastName,
-          email: su.userId.email,
-          isActive: su.userId.isActive,
-          lastLogin: su.userId.lastLogin,
-          accountCreatedAt: su.userId.createdAt,
-          
-          // Subaccount-specific data
-          role: su.role,
-          permissions: su.permissions,
-          joinedAt: su.createdAt,
-          lastAccessed: su.lastAccessed,
-          stats: su.stats,
-          invitedBy: su.invitedBy ? {
-            id: su.invitedBy._id,
-            name: `${su.invitedBy.firstName} ${su.invitedBy.lastName}`,
-            email: su.invitedBy.email
-          } : null,
-          invitedAt: su.invitedAt,
-          acceptedAt: su.acceptedAt,
-          
-          // Temporary access
-          temporaryAccess: su.temporaryAccess
-        })),
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total,
-          pages: Math.ceil(total / limit)
-        }
-      };
-
-      // Cache the result for 15 minutes
-      if (redisService && redisService.isConnected) {
-        try {
-          await redisService.set(cacheKey, result, 900);
-        } catch (error) {
-          Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
-        }
-      }
-
-      Logger.info('Subaccount users retrieved', {
-        userId,
-        subaccountId,
-        count: result.users.length,
-        total
-      });
-
-      res.json({
-        success: true,
-        message: 'Subaccount users retrieved successfully',
-        data: result
-      });
-
-    } catch (error) {
-      Logger.error('Failed to get subaccount users', {
-        error: error.message,
-        stack: error.stack,
-        userId: req.user?.id,
-        subaccountId: req.params.subaccountId
-      });
-      next(error);
-    }
-  
+  }
 
   // Invite user to subaccount
   static async inviteUser(req, res, next) {

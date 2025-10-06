@@ -1,6 +1,8 @@
 const axios = require('axios');
 const config = require('../../config/config');
 const Logger = require('../utils/logger');
+const http = require('http');
+const https = require('https');
 
 class AuthService {
   constructor() {
@@ -14,7 +16,24 @@ class AuthService {
       headers: {
         'Content-Type': 'application/json',
         'User-Agent': 'ScalAI-TenantManager/1.0.0'
-      }
+      },
+      // Enable keep-alive with proper socket management
+      httpAgent: new http.Agent({ 
+        keepAlive: true,
+        keepAliveMsecs: 1000,
+        maxSockets: 50,
+        maxFreeSockets: 10,
+        timeout: 60000,
+        freeSocketTimeout: 30000
+      }),
+      httpsAgent: new https.Agent({ 
+        keepAlive: true,
+        keepAliveMsecs: 1000,
+        maxSockets: 50,
+        maxFreeSockets: 10,
+        timeout: 60000,
+        freeSocketTimeout: 30000
+      })
     });
     
     // Add request interceptor for logging
@@ -33,7 +52,7 @@ class AuthService {
       }
     );
     
-    // Add response interceptor for logging
+    // Add response interceptor for logging and retry logic
     this.client.interceptors.response.use(
       (response) => {
         Logger.debug('Auth service response', {
@@ -43,14 +62,38 @@ class AuthService {
         });
         return response;
       },
-      (error) => {
+      async (error) => {
+        const config = error.config;
+        
         Logger.error('Auth service response error', {
           status: error.response?.status,
           statusText: error.response?.statusText,
           url: error.config?.url,
           method: error.config?.method?.toUpperCase(),
-          message: error.message
+          message: error.message,
+          code: error.code,
+          errno: error.errno,
+          syscall: error.syscall
         });
+        
+        // Retry on connection errors (ECONNRESET, ETIMEDOUT, ECONNREFUSED, etc.)
+        const retryableErrors = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE'];
+        const shouldRetry = retryableErrors.includes(error.code) && (!config.__retryCount || config.__retryCount < 3);
+        
+        if (shouldRetry) {
+          config.__retryCount = (config.__retryCount || 0) + 1;
+          Logger.warn(`Retrying request (attempt ${config.__retryCount}/3)`, {
+            url: config.url,
+            method: config.method,
+            error: error.code
+          });
+          
+          // Wait a bit before retrying (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 100 * config.__retryCount));
+          
+          return this.client(config);
+        }
+        
         return Promise.reject(error);
       }
     );
@@ -64,7 +107,8 @@ class AuthService {
       const response = await this.client.get('/api/users/search', {
         params: { email },
         headers: {
-          'Authorization': `Bearer ${token}`
+          'X-Service-Token': config.serviceToken.token,
+          'X-Service-Name': config.server.serviceName
         }
       });
       
@@ -116,9 +160,19 @@ class AuthService {
     try {
       Logger.debug('Fetching user by ID from auth service', { userId });
       
+      // Print the equivalent curl command for debugging
+      console.log(`curl -X GET '${this.client.defaults.baseURL}/api/users/${userId}' \\`);
+      console.log(`  -H 'Authorization: Bearer ${token}' \\`);
+      console.log(`  -H 'X-Service-Token: ${config.serviceToken.token}' \\`);
+      console.log(`  -H 'X-Service-Name: ${config.server.serviceName}' \\`);
+      console.log(`  -H 'X-User-ID: ${userId}'`);
+
       const response = await this.client.get(`/api/users/${userId}`, {
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          'X-Service-Token': config.serviceToken.token,
+          'X-Service-Name': config.server.serviceName,
+          'X-User-ID': userId
         }
       });
       

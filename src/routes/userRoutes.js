@@ -6,10 +6,13 @@ const UserController = require('../controllers/userController');
 
 // Import middleware
 const { 
-  authenticateToken, 
-  validateSubaccountAccess, 
   requestLogger 
 } = require('../middleware/authMiddleware');
+
+const {
+  authenticateTokenOrService,
+  validateUserAccessOrService
+} = require('../middleware/serviceAuthMiddleware');
 
 const { 
   userLimiter, 
@@ -27,7 +30,7 @@ const {
 
 // Apply common middleware
 router.use(requestLogger);
-router.use(authenticateToken);
+router.use(authenticateTokenOrService);
 router.use(userLimiter);
 
 // Routes for subaccount user management
@@ -35,14 +38,14 @@ router.use(userLimiter);
 // GET /api/subaccounts/:subaccountId/users - Get subaccount users
 router.get('/:subaccountId/users',
   validateSubaccountId,
-  validateSubaccountAccess('admin'),
+  validateUserAccessOrService('read'),
   UserController.getSubaccountUsers
 );
 
 // POST /api/subaccounts/:subaccountId/users - Invite user to subaccount
 router.post('/:subaccountId/users',
   validateSubaccountId,
-  validateSubaccountAccess('admin'),
+  validateUserAccessOrService('write'),
   burstProtection, // Prevent rapid invitations
   validateInviteUser,
   UserController.inviteUser
@@ -52,7 +55,7 @@ router.post('/:subaccountId/users',
 router.put('/:subaccountId/users/:targetUserId',
   validateSubaccountId,
   validateUserId('targetUserId'),
-  validateSubaccountAccess('admin'),
+  validateUserAccessOrService('write'),
   validateUpdatePermissions,
   UserController.updateUserPermissions
 );
@@ -61,7 +64,7 @@ router.put('/:subaccountId/users/:targetUserId',
 router.delete('/:subaccountId/users/:targetUserId',
   validateSubaccountId,
   validateUserId('targetUserId'),
-  validateSubaccountAccess('admin'),
+  validateUserAccessOrService('write'),
   burstProtection, // Prevent rapid user removal
   UserController.removeUser
 );
@@ -70,7 +73,7 @@ router.delete('/:subaccountId/users/:targetUserId',
 router.get('/:subaccountId/users/:targetUserId/activity',
   validateSubaccountId,
   validateUserId('targetUserId'),
-  validateSubaccountAccess('read'), // Users can see their own activity
+  validateUserAccessOrService('read'), // Users can see their own activity
   subaccountLimiter(20, 60000), // Max 20 activity requests per minute
   UserController.getUserActivity
 );
