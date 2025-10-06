@@ -911,6 +911,7 @@ static async getUserSubaccounts(req, res, next) {
         });
       }
 
+      
       // Call webhook service to invite email
       const inviteResult = await webhookService.inviteEmailForCalendarIntegration(
         subaccountId,
