@@ -190,6 +190,11 @@ class UserController {
   }
 
   // Invite user to subaccount
+  // When inviting a user to a subaccount, they automatically inherit:
+  // 1. Role-based basic permissions (read, write, delete, admin)
+  // 2. Collection-specific resource permissions from existing non-admin users
+  // 3. Query limits from existing non-admin users
+  // This ensures consistent access to resources across all regular users in the subaccount
   static async inviteUser(req, res, next) {
     try {
       const { subaccountId } = req.params;
@@ -286,6 +291,73 @@ class UserController {
         });
       }
 
+      // Get collection-specific permissions from existing non-admin users
+      // This ensures new users get the same resource/collection permissions as other regular users
+      let collectionPermissions = [];
+      let queryLimits = {
+        maxDocuments: 1000,
+        maxQueryTime: 30000,
+        allowAggregation: true,
+        allowTextSearch: true
+      };
+
+      // Find a reference user (non-admin) to copy resource permissions from
+      // We use the oldest non-admin user as the reference to maintain consistency
+      const referenceUser = await UserSubaccount.findOne({
+        subaccountId,
+        isActive: true,
+        role: { $in: ['viewer', 'editor'] } // Only get permissions from non-admin users
+      }).sort({ createdAt: 1 }); // Get the oldest user as reference
+
+      if (referenceUser && referenceUser.permissions) {
+        // Copy collection-specific permissions from reference user
+        if (referenceUser.permissions.collections && referenceUser.permissions.collections.length > 0) {
+          collectionPermissions = referenceUser.permissions.collections.map(coll => ({
+            name: coll.name,
+            permissions: {
+              read: coll.permissions.read,
+              write: coll.permissions.write,
+              delete: coll.permissions.delete
+            }
+          }));
+          
+          Logger.info('Copying resource/collection permissions from reference user to new user', {
+            subaccountId,
+            newUserId: inviteeUser.id,
+            newUserEmail: email,
+            referenceUserId: referenceUser.userId,
+            collectionsCount: collectionPermissions.length,
+            collections: collectionPermissions.map(c => c.name)
+          });
+        } else {
+          Logger.info('No collection-specific permissions found in reference user', {
+            subaccountId,
+            newUserId: inviteeUser.id,
+            referenceUserId: referenceUser.userId
+          });
+        }
+
+        // Copy query limits from reference user
+        if (referenceUser.permissions.queryLimits) {
+          queryLimits = {
+            maxDocuments: referenceUser.permissions.queryLimits.maxDocuments || 1000,
+            maxQueryTime: referenceUser.permissions.queryLimits.maxQueryTime || 30000,
+            allowAggregation: referenceUser.permissions.queryLimits.allowAggregation !== undefined 
+              ? referenceUser.permissions.queryLimits.allowAggregation 
+              : true,
+            allowTextSearch: referenceUser.permissions.queryLimits.allowTextSearch !== undefined 
+              ? referenceUser.permissions.queryLimits.allowTextSearch 
+              : true
+          };
+        }
+      } else {
+        Logger.info('No reference non-admin user found to copy permissions from', {
+          subaccountId,
+          newUserId: inviteeUser.id,
+          newUserEmail: email
+        });
+      }
+
       // Create user-subaccount relationship
       const newUserSubaccount = new UserSubaccount({
         userId: inviteeUser.id,
@@ -296,7 +368,10 @@ class UserController {
           // Override with role-based defaults
           ...(role === 'viewer' && { read: true, write: false, delete: false, admin: false }),
           ...(role === 'editor' && { read: true, write: true, delete: false, admin: false }),
-          ...(role === 'admin' && { read: true, write: true, delete: true, admin: false })
+          ...(role === 'admin' && { read: true, write: true, delete: true, admin: false }),
+          // Add collection-specific permissions from reference user
+          collections: collectionPermissions,
+          queryLimits: queryLimits
         },
         invitedBy: userId,
         invitedAt: new Date(),
