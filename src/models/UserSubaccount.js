@@ -206,8 +206,8 @@ userSubaccountSchema.statics.hasAccess = async function(userId, subaccountId, op
 
 // Instance method to check specific permission
 userSubaccountSchema.methods.hasPermission = function(operation) {
-  // Admin has all permissions
-  if (this.permissions.admin || this.role === 'owner') {
+  // Admin and owner have all permissions
+  if (this.permissions.admin || this.role === 'owner' || this.role === 'admin') {
     return true;
   }
   
@@ -230,7 +230,7 @@ userSubaccountSchema.methods.hasPermission = function(operation) {
     
     case 'admin':
     case 'manage':
-      return this.permissions.admin;
+      return this.permissions.admin || this.role === 'admin';
     
     default:
       return false;
@@ -349,7 +349,7 @@ userSubaccountSchema.pre('save', function(next) {
         this.permissions.read = true;
         this.permissions.write = true;
         this.permissions.delete = true;
-        this.permissions.admin = false;
+        this.permissions.admin = true;
         break;
       
       case 'owner':

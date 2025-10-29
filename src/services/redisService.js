@@ -179,8 +179,42 @@ class RedisService {
   }
 
   async invalidateSubaccount(subaccountId) {
-    const key = `${config.redis.prefixes.subaccount}${subaccountId}`;
-    return await this.del(key);
+    if (!this.isConnected) {
+      return null;
+    }
+
+    try {
+      // Invalidate the specific subaccount cache
+      const key = `${config.redis.prefixes.subaccount}${subaccountId}`;
+      await this.del(key);
+
+      // Also invalidate all global admin caches that might contain this subaccount
+      const pattern = `user_subaccounts:*:global_admin:*`;
+      const keys = [];
+      let cursor = '0';
+      
+      do {
+        const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = reply[0];
+        keys.push(...reply[1]);
+      } while (cursor !== '0');
+      
+      if (keys.length > 0) {
+        await this.client.del(...keys);
+        Logger.debug('Invalidated global admin caches for subaccount', { 
+          subaccountId, 
+          keysDeleted: keys.length 
+        });
+      }
+
+      return { subaccountKey: key, globalAdminKeys: keys.length };
+    } catch (error) {
+      Logger.warn('Failed to invalidate subaccount cache', { 
+        subaccountId, 
+        error: error.message 
+      });
+      return null;
+    }
   }
 
   async cacheUserSubaccounts(userId, data, ttl = 3600) {
@@ -194,8 +228,39 @@ class RedisService {
   }
 
   async invalidateUserSubaccounts(userId) {
-    const key = `${config.redis.prefixes.userSubaccount}${userId}`;
-    return await this.del(key);
+    if (!this.isConnected) {
+      return null;
+    }
+
+    try {
+      // Invalidate all cache keys matching the pattern for this user
+      // This includes both regular user and global admin caches with any query params
+      const pattern = `user_subaccounts:${userId}:*`;
+      
+      // Use SCAN to find all matching keys (safer than KEYS in production)
+      const keys = [];
+      let cursor = '0';
+      
+      do {
+        const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = reply[0];
+        keys.push(...reply[1]);
+      } while (cursor !== '0');
+      
+      // Delete all found keys
+      if (keys.length > 0) {
+        await this.client.del(...keys);
+        Logger.debug('Invalidated user subaccount caches', { userId, keysDeleted: keys.length });
+      }
+      
+      return keys.length;
+    } catch (error) {
+      Logger.warn('Failed to invalidate user subaccount caches', { 
+        userId, 
+        error: error.message 
+      });
+      return null;
+    }
   }
 
   async cachePermissions(userId, subaccountId, permissions, ttl = 3600) {

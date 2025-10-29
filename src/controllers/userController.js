@@ -32,19 +32,25 @@ class UserController {
         query: req.query
       });
 
-      // Check if user has admin permissions for this subaccount
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
 
-      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to view subaccount users',
-          code: 'INSUFFICIENT_PERMISSIONS'
+      // Check if user has admin permissions for this subaccount
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
         });
+
+        if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to view subaccount users',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
       // Get Redis service instance (dynamic)
@@ -208,19 +214,25 @@ class UserController {
         role
       });
 
-      // Check if user has admin permissions
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
 
-      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to invite users',
-          code: 'INSUFFICIENT_PERMISSIONS'
+      // Check if user has admin permissions
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
         });
+
+        if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to invite users',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
       // Check if subaccount exists and is active
@@ -368,7 +380,7 @@ class UserController {
           // Override with role-based defaults
           ...(role === 'viewer' && { read: true, write: false, delete: false, admin: false }),
           ...(role === 'editor' && { read: true, write: true, delete: false, admin: false }),
-          ...(role === 'admin' && { read: true, write: true, delete: true, admin: false }),
+          ...(role === 'admin' && { read: true, write: true, delete: true, admin: true }),
           // Add collection-specific permissions from reference user
           collections: collectionPermissions,
           queryLimits: queryLimits
@@ -406,7 +418,7 @@ class UserController {
         try {
           await Promise.all([
             redisService.invalidateUserSubaccounts(inviteeUser._id),
-            redisService.invalidateSubaccountCache(subaccountId)
+            redisService.invalidateSubaccount(subaccountId)
           ]);
         } catch (error) {
           Logger.warn('Cache invalidation failed', { error: error.message });
@@ -474,23 +486,29 @@ class UserController {
         updates: { role, permissions, temporaryAccess }
       });
 
-      // Check if user has admin permissions
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
 
-      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to update user permissions',
-          code: 'INSUFFICIENT_PERMISSIONS'
+      // Check if user has admin permissions
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
         });
+
+        if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to update user permissions',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
-      // Prevent self-modification of admin status
-      if (targetUserId === userId && role && role !== userSubaccount.role) {
+      // Prevent self-modification of admin status (skip check for global admins)
+      if (!isGlobalAdmin && targetUserId === userId && role && userSubaccount && role !== userSubaccount.role) {
         return res.status(400).json({
           success: false,
           message: 'Cannot modify your own role',
@@ -628,19 +646,25 @@ class UserController {
         targetUserId
       });
 
-      // Check if user has admin permissions
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
 
-      if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to remove users',
-          code: 'INSUFFICIENT_PERMISSIONS'
+      // Check if user has admin permissions
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
         });
+
+        if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to remove users',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
       // Find target user-subaccount relationship
@@ -709,7 +733,7 @@ class UserController {
           await Promise.all([
             redisService.invalidateUserSubaccounts(targetUserId),
             redisService.invalidatePermissions(targetUserId, subaccountId),
-            redisService.invalidateSubaccountCache(subaccountId)
+            redisService.invalidateSubaccount(subaccountId)
           ]);
         } catch (error) {
           Logger.warn('Cache invalidation failed', { error: error.message });
@@ -754,28 +778,34 @@ class UserController {
         days
       });
 
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
+
       // Check permissions (admin can see all, users can see their own)
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        isActive: true
-      });
-
-      if (!userSubaccount) {
-        return res.status(403).json({
-          success: false,
-          message: 'Access denied to subaccount',
-          code: 'ACCESS_DENIED'
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
         });
-      }
 
-      // Only admin can see other users' activity
-      if (targetUserId !== userId && !userSubaccount.hasPermission('admin')) {
-        return res.status(403).json({
-          success: false,
-          message: 'Admin permissions required to view other users activity',
-          code: 'INSUFFICIENT_PERMISSIONS'
-        });
+        if (!userSubaccount) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied to subaccount',
+            code: 'ACCESS_DENIED'
+          });
+        }
+
+        // Only admin can see other users' activity
+        if (targetUserId !== userId && !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to view other users activity',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
       // Get target user-subaccount relationship

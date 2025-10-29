@@ -28,12 +28,15 @@ static async getUserSubaccounts(req, res, next) {
 
       Logger.debug('Starting getUserSubaccounts', { userId, startTime });
 
+      // Check if user is a global admin or super_admin
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
+
       // Get Redis service instance (dynamic)
       const redisService = redisManager.getRedisService();
 
       // Check cache first (if Redis is connected)
       let cachedData = null;
-      const cacheKey = `user_subaccounts:${userId}:${JSON.stringify(req.query)}`;
+      const cacheKey = `user_subaccounts:${userId}:${isGlobalAdmin ? 'global_admin' : 'user'}:${JSON.stringify(req.query)}`;
       
       if (redisService && redisService.isConnected) {
         try {
@@ -53,82 +56,163 @@ static async getUserSubaccounts(req, res, next) {
         });
       }
 
-      // Build query
-      const query = { userId, isActive: true };
-      if (role) query.role = role;
-
       // Get user subaccounts with pagination and timeout
       const skip = (page - 1) * limit;
       
       // Add timeout to prevent hanging queries
       const queryTimeout = 15000; // 15 seconds
       
-      Logger.debug('Executing database query', { query, skip, limit, queryTimeout });
+      Logger.debug('Executing database query', { isGlobalAdmin, skip, limit, queryTimeout });
       
       try {
-        const [userSubaccounts, total] = await Promise.race([
-          Promise.all([
-            UserSubaccount.find(query)
-              .populate({
-                path: 'subaccountId',
-                match: status ? { isActive: status === 'active' } : {},
-                select: 'name description isActive stats createdAt maintenanceMode rateLimits activatedConnectors',
-                populate: {
+        let result;
+        
+        if (isGlobalAdmin) {
+          // Global admins see all subaccounts (active by default unless status param is set)
+          const subaccountQuery = {};
+          // Default to showing only active subaccounts unless status query param is explicitly set
+          if (status !== undefined) {
+            // If status param is provided, use it explicitly
+            subaccountQuery.isActive = status === 'active';
+          } else {
+            // Default: show only active subaccounts
+            subaccountQuery.isActive = true;
+          }
+          
+          const [subaccounts, total] = await Promise.race([
+            Promise.all([
+              Subaccount.find(subaccountQuery)
+                .select('name description isActive stats createdAt maintenanceMode rateLimits activatedConnectors createdBy')
+                .populate({
                   path: 'activatedConnectors.connectorId',
                   select: 'type name icon category'
-                }
-              })
-              .sort({ createdAt: -1 })
-              .skip(skip)
-              .limit(parseInt(limit))
-              .maxTimeMS(queryTimeout),
-            UserSubaccount.countDocuments(query).maxTimeMS(queryTimeout)
-          ]),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Database query timeout')), queryTimeout + 1000)
-          )
-        ]);
+                })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit))
+                .maxTimeMS(queryTimeout),
+              Subaccount.countDocuments(subaccountQuery).maxTimeMS(queryTimeout)
+            ]),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Database query timeout')), queryTimeout + 1000)
+            )
+          ]);
 
-        Logger.debug('Database query completed', { 
-          userSubaccountsCount: userSubaccounts.length, 
-          total,
-          duration: Date.now() - startTime 
-        });
-
-        // Filter out null subaccounts (from populate match)
-        const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
-        console.log('[DEBUG] Filtered subaccounts', { validCount: validSubaccounts.length });
-
-        const result = {
-          subaccounts: validSubaccounts.map(us => ({
-            id: us.subaccountId._id,
-            name: us.subaccountId.name,
-            description: us.subaccountId.description,
-            isActive: us.subaccountId.isActive,
-            maintenanceMode: us.subaccountId.maintenanceMode,
-            role: us.role,
-            permissions: us.permissions,
-            stats: us.subaccountId.stats,
-            rateLimits: us.subaccountId.rateLimits,
-            joinedAt: us.createdAt,
-            lastAccessed: us.lastAccessed,
-            userStats: us.stats,
-            activatedConnectors: us.subaccountId.activatedConnectors
-              .filter(ac => ac.connectorId && ac.isActive)
-              .map(ac => ({
-                type: ac.connectorId.type,
-                name: ac.connectorId.name,
-                icon: ac.connectorId.icon,
-                category: ac.connectorId.category
-              }))
-          })),
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
+          Logger.debug('Global admin query completed', { 
+            subaccountsCount: subaccounts.length, 
             total,
-            pages: Math.ceil(total / limit)
-          }
-        };
+            duration: Date.now() - startTime 
+          });
+
+          result = {
+            subaccounts: subaccounts.map(subaccount => ({
+              id: subaccount._id,
+              name: subaccount.name,
+              description: subaccount.description,
+              isActive: subaccount.isActive,
+              maintenanceMode: subaccount.maintenanceMode,
+              role: 'admin', // Global admins have admin role on all subaccounts
+              permissions: {
+                read: true,
+                write: true,
+                delete: true,
+                admin: true
+              },
+              stats: subaccount.stats,
+              rateLimits: subaccount.rateLimits,
+              joinedAt: subaccount.createdAt,
+              lastAccessed: null,
+              userStats: {
+                totalQueries: 0,
+                totalDocumentsRead: 0,
+                totalDocumentsWritten: 0,
+                avgResponseTime: 0
+              },
+              activatedConnectors: subaccount.activatedConnectors
+                .filter(ac => ac.connectorId && ac.isActive)
+                .map(ac => ({
+                  type: ac.connectorId.type,
+                  name: ac.connectorId.name,
+                  icon: ac.connectorId.icon,
+                  category: ac.connectorId.category
+                }))
+            })),
+            pagination: {
+              page: parseInt(page),
+              limit: parseInt(limit),
+              total,
+              pages: Math.ceil(total / limit)
+            }
+          };
+        } else {
+          // Regular users see only their linked subaccounts
+          const query = { userId, isActive: true };
+          if (role) query.role = role;
+
+          const [userSubaccounts, total] = await Promise.race([
+            Promise.all([
+              UserSubaccount.find(query)
+                .populate({
+                  path: 'subaccountId',
+                  match: status ? { isActive: status === 'active' } : {},
+                  select: 'name description isActive stats createdAt maintenanceMode rateLimits activatedConnectors',
+                  populate: {
+                    path: 'activatedConnectors.connectorId',
+                    select: 'type name icon category'
+                  }
+                })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit))
+                .maxTimeMS(queryTimeout),
+              UserSubaccount.countDocuments(query).maxTimeMS(queryTimeout)
+            ]),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Database query timeout')), queryTimeout + 1000)
+            )
+          ]);
+
+          Logger.debug('User query completed', { 
+            userSubaccountsCount: userSubaccounts.length, 
+            total,
+            duration: Date.now() - startTime 
+          });
+
+          // Filter out null subaccounts (from populate match)
+          const validSubaccounts = userSubaccounts.filter(us => us.subaccountId);
+          console.log('[DEBUG] Filtered subaccounts', { validCount: validSubaccounts.length });
+
+          result = {
+            subaccounts: validSubaccounts.map(us => ({
+              id: us.subaccountId._id,
+              name: us.subaccountId.name,
+              description: us.subaccountId.description,
+              isActive: us.subaccountId.isActive,
+              maintenanceMode: us.subaccountId.maintenanceMode,
+              role: us.role,
+              permissions: us.permissions,
+              stats: us.subaccountId.stats,
+              rateLimits: us.subaccountId.rateLimits,
+              joinedAt: us.createdAt,
+              lastAccessed: us.lastAccessed,
+              userStats: us.stats,
+              activatedConnectors: us.subaccountId.activatedConnectors
+                .filter(ac => ac.connectorId && ac.isActive)
+                .map(ac => ({
+                  type: ac.connectorId.type,
+                  name: ac.connectorId.name,
+                  icon: ac.connectorId.icon,
+                  category: ac.connectorId.category
+                }))
+            })),
+            pagination: {
+              page: parseInt(page),
+              limit: parseInt(limit),
+              total,
+              pages: Math.ceil(total / limit)
+            }
+          };
+        }
 
         // Cache the result for 30 minutes (if Redis is connected)
         if (redisService && redisService.isConnected) {
@@ -143,8 +227,9 @@ static async getUserSubaccounts(req, res, next) {
         Logger.info('User subaccounts retrieved', {
           userId,
           count: result.subaccounts.length,
-          total,
-          duration: `${duration}ms`
+          total: result.pagination.total,
+          duration: `${duration}ms`,
+          isGlobalAdmin
         });
 
         res.json({
@@ -156,7 +241,8 @@ static async getUserSubaccounts(req, res, next) {
         console.log('[DEBUG] Database query failed', dbError.message);
         Logger.error('Database query failed', {
           error: dbError.message,
-          query,
+          queryParams: req.query,
+          isGlobalAdmin,
           userId,
           duration: Date.now() - startTime
         });
@@ -715,20 +801,26 @@ static async getUserSubaccounts(req, res, next) {
       // Get Redis service instance (dynamic)
       const redisService = redisManager.getRedisService();
 
-      // Check if user is owner
-      const userSubaccount = await UserSubaccount.findOne({
-        userId,
-        subaccountId,
-        role: 'owner',
-        isActive: true
-      });
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
 
-      if (!userSubaccount) {
-        return res.status(403).json({
-          success: false,
-          message: 'Only subaccount owner can delete subaccount',
-          code: 'OWNER_REQUIRED'
+      // Check if user is owner or admin of this specific subaccount
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          role: { $in: ['owner', 'admin'] },
+          isActive: true
         });
+
+        if (!userSubaccount) {
+          return res.status(403).json({
+            success: false,
+            message: 'Only subaccount owner or admin can delete subaccount',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
       }
 
       // Use transaction for atomic operation
@@ -767,7 +859,8 @@ static async getUserSubaccounts(req, res, next) {
       });
 
       // Invalidate all related caches
-      await redisService.invalidateSubaccountCache(subaccountId);
+      await redisService.invalidateSubaccount(subaccountId);
+      await redisService.invalidateUserSubaccounts(userId);
 
       Logger.security('Subaccount deleted', 'medium', {
         userId,

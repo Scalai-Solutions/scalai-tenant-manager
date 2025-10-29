@@ -4,10 +4,6 @@ const connectorSchema = new mongoose.Schema({
   type: {
     type: String,
     required: [true, 'Connector type is required'],
-    enum: {
-      values: ['google_calendar', 'outlook_calendar', 'zoom', 'slack', 'teams', 'webhook', 'custom', 'twilio'],
-      message: '{VALUE} is not a supported connector type'
-    },
     trim: true
   },
   
