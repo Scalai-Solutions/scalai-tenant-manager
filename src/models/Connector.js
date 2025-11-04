@@ -48,7 +48,7 @@ const connectorSchema = new mongoose.Schema({
   // Category for organizing connectors
   category: {
     type: String,
-    enum: ['calendar', 'communication', 'video', 'productivity', 'custom', 'other'],
+    enum: ['calendar', 'communication', 'video', 'productivity', 'custom', 'other', 'chat', 'messaging'],
     default: 'other'
   },
   
@@ -103,6 +103,7 @@ connectorSchema.methods.validateConfig = function() {
     slack: ['botToken', 'appToken'],
     teams: ['webhookUrl'],
     webhook: ['url', 'method'],
+    whatsapp: [],  // WhatsApp uses QR authentication, no required config upfront
     custom: []
   };
   
@@ -155,6 +156,11 @@ connectorSchema.statics.getConfigTemplate = function(type) {
       authentication: {
         type: 'none' // 'none', 'basic', 'bearer', 'apiKey'
       }
+    },
+    whatsapp: {
+      agentId: '',
+      autoReply: false,
+      webhookUrl: ''
     },
     custom: {}
   };
