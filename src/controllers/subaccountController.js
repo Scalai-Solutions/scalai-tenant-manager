@@ -537,8 +537,57 @@ static async getUserSubaccounts(req, res, next) {
         });
       }
 
+      // Auto-generate MongoDB URL if not provided
+      let finalMongodbUrl = mongodbUrl;
+      if (!finalMongodbUrl || finalMongodbUrl.trim() === '') {
+        try {
+          Logger.info('Auto-generating MongoDB URL from admin connection', {
+            userId,
+            databaseName
+          });
+          
+          finalMongodbUrl = SubaccountController.buildMongoUrlFromAdminConnection(databaseName);
+          
+          Logger.info('MongoDB URL auto-generated successfully', {
+            userId,
+            databaseName,
+            maskedUrl: SubaccountController.maskConnectionString(finalMongodbUrl)
+          });
+
+          // Optionally test the connection (lightweight verification)
+          try {
+            await SubaccountController.testMongoConnection(finalMongodbUrl, databaseName);
+            Logger.debug('MongoDB connection test passed', {
+              userId,
+              databaseName
+            });
+          } catch (testError) {
+            // Log warning but don't fail - database will be created on first write
+            Logger.warn('MongoDB connection test failed (non-critical)', {
+              error: testError.message,
+              userId,
+              databaseName,
+              note: 'Database will be created automatically on first write'
+            });
+          }
+        } catch (error) {
+          Logger.error('Failed to auto-generate MongoDB URL', {
+            error: error.message,
+            userId,
+            databaseName
+          });
+          
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to auto-generate MongoDB URL. Please provide mongodbUrl explicitly.',
+            code: 'MONGODB_URL_GENERATION_FAILED',
+            error: error.message
+          });
+        }
+      }
+
       // Validate MongoDB URL format and allowed hosts
-      if (!SubaccountController.validateMongoUrl(mongodbUrl)) {
+      if (!SubaccountController.validateMongoUrl(finalMongodbUrl)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid MongoDB URL format',
@@ -546,10 +595,10 @@ static async getUserSubaccounts(req, res, next) {
         });
       }
 
-      if (!SubaccountController.isHostAllowed(mongodbUrl)) {
+      if (!SubaccountController.isHostAllowed(finalMongodbUrl)) {
         Logger.security('Unauthorized MongoDB host', 'high', {
           userId,
-          mongodbUrl: SubaccountController.maskConnectionString(mongodbUrl)
+          mongodbUrl: SubaccountController.maskConnectionString(finalMongodbUrl)
         });
 
         return res.status(403).json({
@@ -565,7 +614,7 @@ static async getUserSubaccounts(req, res, next) {
         const subaccount = new Subaccount({
           name,
           description,
-          mongodbUrl, // Will be encrypted by pre-save middleware
+          mongodbUrl: finalMongodbUrl, // Will be encrypted by pre-save middleware
           databaseName,
           maxConnections: Math.min(maxConnections, 20), // Cap at 20
           enforceSchema,
@@ -609,10 +658,19 @@ static async getUserSubaccounts(req, res, next) {
 
         const result = { subaccount, userSubaccount };
 
-        // Invalidate user cache
+        // Invalidate caches
         if (redisService && redisService.isConnected) {
           try {
+            // Invalidate user subaccounts cache
             await redisService.invalidateUserSubaccounts(userId);
+            
+            // Invalidate subaccount users cache for the new subaccount
+            await redisService.invalidateSubaccountUsers(subaccount._id.toString());
+            
+            Logger.debug('Caches invalidated after subaccount creation', {
+              userId,
+              subaccountId: subaccount._id
+            });
           } catch (cacheError) {
             Logger.warn('Failed to invalidate cache', { error: cacheError.message });
           }
@@ -759,10 +817,17 @@ static async getUserSubaccounts(req, res, next) {
       }
 
       // Invalidate caches
-      await Promise.all([
-        redisService.invalidateSubaccount(subaccountId),
-        redisService.invalidateUserSubaccounts(userId)
-      ]);
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidateSubaccount(subaccountId),
+            redisService.invalidateSubaccountUsers(subaccountId),
+            redisService.invalidateUserSubaccounts(userId)
+          ]);
+        } catch (cacheError) {
+          Logger.warn('Failed to invalidate cache', { error: cacheError.message });
+        }
+      }
 
       Logger.info('Subaccount updated successfully', {
         userId,
@@ -859,8 +924,17 @@ static async getUserSubaccounts(req, res, next) {
       });
 
       // Invalidate all related caches
-      await redisService.invalidateSubaccount(subaccountId);
-      await redisService.invalidateUserSubaccounts(userId);
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidateSubaccount(subaccountId),
+            redisService.invalidateSubaccountUsers(subaccountId),
+            redisService.invalidateUserSubaccounts(userId)
+          ]);
+        } catch (cacheError) {
+          Logger.warn('Failed to invalidate cache', { error: cacheError.message });
+        }
+      }
 
       Logger.security('Subaccount deleted', 'medium', {
         userId,
@@ -1078,6 +1152,17 @@ static async getUserSubaccounts(req, res, next) {
       // Invalidate the subaccount cache
       await redisService.invalidateSubaccount(subaccountId);
 
+      // Invalidate subaccount users cache
+      try {
+        await redisService.invalidateSubaccountUsers(subaccountId);
+        Logger.debug('Invalidated subaccount users cache', { subaccountId });
+      } catch (error) {
+        Logger.warn('Failed to invalidate subaccount users cache', {
+          subaccountId,
+          error: error.message
+        });
+      }
+
       // Also invalidate user subaccounts cache if userId is available
       if (userId) {
         try {
@@ -1116,6 +1201,119 @@ static async getUserSubaccounts(req, res, next) {
   }
 
   // Helper methods
+  /**
+   * Test MongoDB connection (lightweight verification)
+   * @param {string} mongodbUrl - MongoDB connection URL to test
+   * @param {string} databaseName - Database name to verify
+   * @returns {Promise<void>}
+   */
+  static async testMongoConnection(mongodbUrl, databaseName) {
+    let testConnection = null;
+    try {
+      // Create a temporary connection to test
+      testConnection = mongoose.createConnection(mongodbUrl, {
+        serverSelectionTimeoutMS: 5000,
+        connectTimeoutMS: 5000,
+        socketTimeoutMS: 5000
+      });
+
+      // Wait for connection to be established
+      await new Promise((resolve, reject) => {
+        // Check if already connected
+        if (testConnection.readyState === 1) {
+          resolve();
+          return;
+        }
+
+        const timeout = setTimeout(() => {
+          reject(new Error('Connection timeout'));
+        }, 5000);
+
+        testConnection.once('connected', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+
+        testConnection.once('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+      });
+
+      // Verify we can access the database (listCollections is lightweight)
+      const db = testConnection.db;
+      await db.listCollections().toArray();
+
+      Logger.debug('MongoDB connection test successful', {
+        databaseName,
+        host: testConnection.host
+      });
+    } catch (error) {
+      Logger.warn('MongoDB connection test failed', {
+        error: error.message,
+        databaseName
+      });
+      throw error;
+    } finally {
+      // Clean up test connection
+      if (testConnection) {
+        try {
+          await testConnection.close();
+        } catch (closeError) {
+          Logger.warn('Error closing test connection', {
+            error: closeError.message
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Build MongoDB URL from admin connection by replacing database name
+   * @param {string} databaseName - The database name to use in the connection URL
+   * @returns {string} - Constructed MongoDB URL
+   */
+  static buildMongoUrlFromAdminConnection(databaseName) {
+    try {
+      const adminMongoUri = config.database.mongoUri;
+      
+      if (!adminMongoUri) {
+        throw new Error('Admin MongoDB URI is not configured');
+      }
+
+      // Parse the admin MongoDB URL
+      const url = new URL(adminMongoUri);
+      
+      // Remove existing database name from pathname if present
+      // MongoDB URLs have format: mongodb://host:port/database?options
+      // We want to replace the database part with the new databaseName
+      const pathParts = url.pathname.split('/').filter(part => part.length > 0);
+      
+      // Set the new database name as the pathname
+      // If pathname was empty or just '/', we'll set it to '/databaseName'
+      url.pathname = `/${databaseName}`;
+      
+      // Reconstruct the URL
+      // Note: URL.toString() will properly encode the URL
+      const constructedUrl = url.toString();
+      
+      Logger.debug('Built MongoDB URL from admin connection', {
+        databaseName,
+        adminHost: url.hostname,
+        constructedUrl: this.maskConnectionString(constructedUrl)
+      });
+      
+      return constructedUrl;
+    } catch (error) {
+      Logger.error('Failed to build MongoDB URL from admin connection', {
+        error: error.message,
+        stack: error.stack,
+        databaseName
+      });
+      throw new Error(`Failed to build MongoDB URL: ${error.message}`);
+    }
+  }
+
   static validateMongoUrl(url) {
     try {
       const mongoUrlRegex = /^mongodb(\+srv)?:\/\/.+/;

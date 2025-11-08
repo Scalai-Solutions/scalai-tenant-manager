@@ -90,7 +90,7 @@ app.use('/api', healthRoutes);
 // API routes
 app.use('/api/subaccounts', subaccountRoutes);
 app.use('/api/connectors', connectorRoutes);
-app.use('/api', userRoutes);
+app.use('/api/subaccounts', userRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {

@@ -29,9 +29,9 @@ const createSubaccountSchema = Joi.object({
   mongodbUrl: Joi.string()
     .trim()
     .pattern(mongoUrlRegex)
-    .required()
+    .optional()
+    .allow(null, '')
     .messages({
-      'string.empty': 'MongoDB URL is required',
       'string.pattern.base': 'Invalid MongoDB URL format'
     }),
     

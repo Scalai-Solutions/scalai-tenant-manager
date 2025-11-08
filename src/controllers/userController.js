@@ -418,7 +418,8 @@ class UserController {
         try {
           await Promise.all([
             redisService.invalidateUserSubaccounts(inviteeUser._id),
-            redisService.invalidateSubaccount(subaccountId)
+            redisService.invalidateSubaccount(subaccountId),
+            redisService.invalidateSubaccountUsers(subaccountId)
           ]);
         } catch (error) {
           Logger.warn('Cache invalidation failed', { error: error.message });
@@ -588,7 +589,8 @@ class UserController {
         try {
           await Promise.all([
             redisService.invalidatePermissions(targetUserId, subaccountId),
-            redisService.invalidateUserSubaccounts(targetUserId)
+            redisService.invalidateUserSubaccounts(targetUserId),
+            redisService.invalidateSubaccountUsers(subaccountId)
           ]);
         } catch (error) {
           Logger.warn('Cache invalidation failed', { error: error.message });
@@ -624,6 +626,124 @@ class UserController {
 
     } catch (error) {
       Logger.error('Failed to update user permissions', {
+        error: error.message,
+        stack: error.stack,
+        userId: req.user?.id,
+        subaccountId: req.params.subaccountId,
+        targetUserId: req.params.targetUserId
+      });
+      next(error);
+    }
+  }
+
+  // Update user details (firstName, lastName, email)
+  static async updateUserDetails(req, res, next) {
+    try {
+      const { subaccountId, targetUserId } = req.params;
+      const userId = req.user.id;
+      const { firstName, lastName, email } = req.body;
+
+      Logger.audit('Update user details', 'user_update', {
+        userId,
+        subaccountId,
+        targetUserId,
+        updates: { firstName, lastName, email }
+      });
+
+      // Check if user is a global admin or super_admin (they have access to all subaccounts)
+      const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
+
+      // Check if user has admin permissions
+      let userSubaccount = null;
+      if (!isGlobalAdmin) {
+        userSubaccount = await UserSubaccount.findOne({
+          userId,
+          subaccountId,
+          isActive: true
+        });
+
+        if (!userSubaccount || !userSubaccount.hasPermission('admin')) {
+          return res.status(403).json({
+            success: false,
+            message: 'Admin permissions required to update user details',
+            code: 'INSUFFICIENT_PERMISSIONS'
+          });
+        }
+      }
+
+      // Verify target user is in this subaccount
+      const targetUserSubaccount = await UserSubaccount.findOne({
+        userId: targetUserId,
+        subaccountId,
+        isActive: true
+      });
+
+      if (!targetUserSubaccount) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found in this subaccount',
+          code: 'USER_NOT_FOUND'
+        });
+      }
+
+      // Build update data
+      const updateData = {};
+      if (firstName !== undefined) updateData.firstName = firstName;
+      if (lastName !== undefined) updateData.lastName = lastName;
+      if (email !== undefined) updateData.email = email;
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'At least one field (firstName, lastName, email) must be provided',
+          code: 'NO_UPDATES_PROVIDED'
+        });
+      }
+
+      // Update user in auth server
+      const token = req.headers.authorization?.split(' ')[1];
+      const updateResult = await authService.updateUser(targetUserId, updateData, token);
+
+      if (!updateResult.success) {
+        return res.status(updateResult.code === 'EMAIL_ALREADY_EXISTS' ? 400 : 404).json({
+          success: false,
+          message: updateResult.message,
+          code: updateResult.code || 'UPDATE_FAILED'
+        });
+      }
+
+      // Invalidate caches
+      const redisService = redisManager.getRedisService();
+      if (redisService && redisService.isConnected) {
+        try {
+          await Promise.all([
+            redisService.invalidateUserSubaccounts(targetUserId),
+            redisService.invalidateSubaccount(subaccountId),
+            redisService.invalidateSubaccountUsers(subaccountId),
+            redisService.invalidatePermissions(targetUserId, subaccountId)
+          ]);
+        } catch (error) {
+          Logger.warn('Cache invalidation failed', { error: error.message });
+        }
+      }
+
+      Logger.info('User details updated successfully', {
+        userId,
+        subaccountId,
+        targetUserId,
+        updatedFields: Object.keys(updateData)
+      });
+
+      res.json({
+        success: true,
+        message: 'User details updated successfully',
+        data: {
+          user: updateResult.user
+        }
+      });
+
+    } catch (error) {
+      Logger.error('Failed to update user details', {
         error: error.message,
         stack: error.stack,
         userId: req.user?.id,
@@ -693,13 +813,9 @@ class UserController {
 
       // Use transaction for atomic operation
       await Database.withTransaction(async (session) => {
-        // Deactivate user-subaccount relationship
-        await UserSubaccount.findByIdAndUpdate(
+        // Delete user-subaccount relationship (hard delete)
+        await UserSubaccount.findByIdAndDelete(
           targetUserSubaccount._id,
-          { 
-            isActive: false,
-            updatedAt: new Date()
-          },
           { session }
         );
 
@@ -733,7 +849,8 @@ class UserController {
           await Promise.all([
             redisService.invalidateUserSubaccounts(targetUserId),
             redisService.invalidatePermissions(targetUserId, subaccountId),
-            redisService.invalidateSubaccount(subaccountId)
+            redisService.invalidateSubaccount(subaccountId),
+            redisService.invalidateSubaccountUsers(subaccountId)
           ]);
         } catch (error) {
           Logger.warn('Cache invalidation failed', { error: error.message });

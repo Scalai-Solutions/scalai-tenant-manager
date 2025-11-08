@@ -278,6 +278,40 @@ class RedisService {
     return await this.del(key);
   }
 
+  async invalidateSubaccountUsers(subaccountId) {
+    if (!this.isConnected) {
+      return null;
+    }
+
+    try {
+      // Invalidate all subaccount users cache keys for this subaccount
+      // Pattern: subaccount_users:${subaccountId}:*
+      const pattern = `subaccount_users:${subaccountId}:*`;
+      const keys = [];
+      let cursor = '0';
+      
+      do {
+        const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = reply[0];
+        keys.push(...reply[1]);
+      } while (cursor !== '0');
+      
+      // Delete all found keys
+      if (keys.length > 0) {
+        await this.client.del(...keys);
+        Logger.debug('Invalidated subaccount users cache', { subaccountId, keysDeleted: keys.length });
+      }
+      
+      return keys.length;
+    } catch (error) {
+      Logger.warn('Failed to invalidate subaccount users cache', { 
+        subaccountId, 
+        error: error.message 
+      });
+      return null;
+    }
+  }
+
   // Rate limiting methods
   async incrementRateLimit(key, windowSeconds, currentTimestamp = Date.now()) {
     if (!this.isConnected) {

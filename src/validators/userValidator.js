@@ -108,6 +108,36 @@ const updatePermissionsSchema = Joi.object({
   'object.min': 'At least one field must be provided for update'
 });
 
+const updateUserDetailsSchema = Joi.object({
+  firstName: Joi.string()
+    .trim()
+    .min(2)
+    .max(50)
+    .messages({
+      'string.min': 'First name must be at least 2 characters long',
+      'string.max': 'First name cannot exceed 50 characters'
+    }),
+    
+  lastName: Joi.string()
+    .trim()
+    .min(2)
+    .max(50)
+    .messages({
+      'string.min': 'Last name must be at least 2 characters long',
+      'string.max': 'Last name cannot exceed 50 characters'
+    }),
+    
+  email: Joi.string()
+    .email()
+    .lowercase()
+    .trim()
+    .messages({
+      'string.email': 'Please provide a valid email address'
+    })
+}).min(1).messages({
+  'object.min': 'At least one field (firstName, lastName, email) must be provided'
+});
+
 // Middleware functions
 const validateInviteUser = (req, res, next) => {
   const { error, value } = inviteUserSchema.validate(req.body, {
@@ -172,6 +202,38 @@ const validateUpdatePermissions = (req, res, next) => {
   next();
 };
 
+const validateUpdateUserDetails = (req, res, next) => {
+  const { error, value } = updateUserDetailsSchema.validate(req.body, {
+    abortEarly: false,
+    stripUnknown: true
+  });
+  
+  if (error) {
+    const errors = error.details.map(detail => ({
+      field: detail.path.join('.'),
+      message: detail.message
+    }));
+    
+    Logger.warn('User details update validation failed', {
+      userId: req.user?.id,
+      subaccountId: req.params.subaccountId,
+      targetUserId: req.params.targetUserId,
+      errors,
+      body: req.body
+    });
+    
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      code: 'VALIDATION_ERROR',
+      errors
+    });
+  }
+  
+  req.body = value;
+  next();
+};
+
 const validateSubaccountId = (req, res, next) => {
   const { subaccountId } = req.params;
   
@@ -217,8 +279,10 @@ const validateUserId = (paramName = 'userId') => {
 module.exports = {
   validateInviteUser,
   validateUpdatePermissions,
+  validateUpdateUserDetails,
   validateSubaccountId,
   validateUserId,
   inviteUserSchema,
-  updatePermissionsSchema
+  updatePermissionsSchema,
+  updateUserDetailsSchema
 }; 

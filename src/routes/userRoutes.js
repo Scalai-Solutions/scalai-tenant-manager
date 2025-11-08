@@ -24,6 +24,7 @@ const {
 const { 
   validateInviteUser,
   validateUpdatePermissions,
+  validateUpdateUserDetails,
   validateSubaccountId,
   validateUserId 
 } = require('../validators/userValidator');
@@ -58,6 +59,15 @@ router.put('/:subaccountId/users/:targetUserId',
   validateUserAccessOrService('write'),
   validateUpdatePermissions,
   UserController.updateUserPermissions
+);
+
+// PATCH /api/subaccounts/:subaccountId/users/:targetUserId/details - Update user details (firstName, lastName, email)
+router.patch('/:subaccountId/users/:targetUserId/details',
+  validateSubaccountId,
+  validateUserId('targetUserId'),
+  validateUserAccessOrService('write'),
+  validateUpdateUserDetails,
+  UserController.updateUserDetails
 );
 
 // DELETE /api/subaccounts/:subaccountId/users/:targetUserId - Remove user from subaccount

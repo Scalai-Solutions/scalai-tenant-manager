@@ -260,6 +260,64 @@ class AuthService {
     }
   }
   
+  // Update user details
+  async updateUser(userId, updateData, token) {
+    try {
+      Logger.debug('Updating user via auth service', { userId, fields: Object.keys(updateData) });
+      
+      const response = await this.client.put(`/api/users/${userId}`, updateData, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'X-Service-Token': config.serviceToken.token,
+          'X-Service-Name': config.server.serviceName,
+          'X-User-ID': userId
+        }
+      });
+      
+      if (response.data.success && response.data.data.user) {
+        Logger.debug('User updated via auth service', { userId });
+        return {
+          success: true,
+          user: response.data.data.user
+        };
+      } else {
+        return {
+          success: false,
+          message: 'User update failed'
+        };
+      }
+    } catch (error) {
+      Logger.error('Failed to update user via auth service', {
+        userId,
+        error: error.message,
+        status: error.response?.status
+      });
+      
+      if (error.response?.status === 404) {
+        return {
+          success: false,
+          message: 'User not found'
+        };
+      } else if (error.response?.status === 400) {
+        return {
+          success: false,
+          message: error.response?.data?.message || 'Invalid update data',
+          code: error.response?.data?.code
+        };
+      } else if (error.response?.status === 401) {
+        return {
+          success: false,
+          message: 'Authentication failed'
+        };
+      } else {
+        return {
+          success: false,
+          message: 'Auth service unavailable'
+        };
+      }
+    }
+  }
+
   // Health check for auth service
   async healthCheck() {
     try {
