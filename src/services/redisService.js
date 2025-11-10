@@ -410,21 +410,33 @@ class RedisService {
       do {
         const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
         
-        // Handle Redis v4 response format: [cursor, keys[]]
-        if (!reply || !Array.isArray(reply) || reply.length < 2) {
+        // Handle different Redis client response formats
+        let foundKeys = [];
+        let nextCursor = '0';
+        
+        if (Array.isArray(reply) && reply.length >= 2) {
+          // Format: [cursor, keys[]]
+          nextCursor = reply[0];
+          foundKeys = Array.isArray(reply[1]) ? reply[1] : [];
+        } else if (reply && typeof reply === 'object') {
+          // Format: { cursor: number, keys: string[] }
+          if (reply.cursor !== undefined && reply.keys !== undefined) {
+            nextCursor = reply.cursor;
+            foundKeys = Array.isArray(reply.keys) ? reply.keys : [];
+          } else {
+            Logger.warn('Unexpected SCAN reply format in invalidateSubaccountUsers', { reply, pattern });
+            break;
+          }
+        } else {
           Logger.warn('Unexpected SCAN reply format in invalidateSubaccountUsers', { reply, pattern });
           break;
         }
         
-        cursor = reply[0];
-        const foundKeys = reply[1];
-        
-        if (Array.isArray(foundKeys)) {
+        if (foundKeys.length > 0) {
           keys.push(...foundKeys);
-        } else {
-          Logger.warn('SCAN returned non-array keys in invalidateSubaccountUsers', { foundKeys, reply });
-          break;
         }
+        
+        cursor = nextCursor;
       } while (cursor !== '0' && cursor !== 0);
       
       // Delete all found keys
