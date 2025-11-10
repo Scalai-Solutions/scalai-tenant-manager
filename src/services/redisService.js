@@ -195,9 +195,23 @@ class RedisService {
       
       do {
         const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        
+        // Handle Redis v4 response format: [cursor, keys[]]
+        if (!reply || !Array.isArray(reply) || reply.length < 2) {
+          Logger.warn('Unexpected SCAN reply format in invalidateSubaccount', { reply, pattern });
+          break;
+        }
+        
         cursor = reply[0];
-        keys.push(...reply[1]);
-      } while (cursor !== '0');
+        const foundKeys = reply[1];
+        
+        if (Array.isArray(foundKeys)) {
+          keys.push(...foundKeys);
+        } else {
+          Logger.warn('SCAN returned non-array keys in invalidateSubaccount', { foundKeys, reply });
+          break;
+        }
+      } while (cursor !== '0' && cursor !== 0);
       
       if (keys.length > 0) {
         await this.client.del(...keys);
@@ -243,9 +257,23 @@ class RedisService {
       
       do {
         const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        
+        // Handle Redis v4 response format: [cursor, keys[]]
+        if (!reply || !Array.isArray(reply) || reply.length < 2) {
+          Logger.warn('Unexpected SCAN reply format in invalidateUserSubaccounts', { reply, pattern });
+          break;
+        }
+        
         cursor = reply[0];
-        keys.push(...reply[1]);
-      } while (cursor !== '0');
+        const foundKeys = reply[1];
+        
+        if (Array.isArray(foundKeys)) {
+          keys.push(...foundKeys);
+        } else {
+          Logger.warn('SCAN returned non-array keys in invalidateUserSubaccounts', { foundKeys, reply });
+          break;
+        }
+      } while (cursor !== '0' && cursor !== 0);
       
       // Delete all found keys
       if (keys.length > 0) {
@@ -258,6 +286,95 @@ class RedisService {
       Logger.warn('Failed to invalidate user subaccount caches', { 
         userId, 
         error: error.message 
+      });
+      return null;
+    }
+  }
+
+  async invalidateAllUserSubaccounts() {
+    if (!this.isConnected) {
+      Logger.warn('Redis not connected, cannot invalidate user subaccount caches');
+      return null;
+    }
+
+    try {
+      // Invalidate ALL user subaccount caches (for all users and all query params)
+      // This is used when a new subaccount is created to ensure all caches are cleared
+      const pattern = `user_subaccounts:*`;
+      
+      Logger.debug('Starting to invalidate all user subaccount caches', { pattern });
+      
+      // Use SCAN to find all matching keys (safer than KEYS in production)
+      const keys = [];
+      let cursor = '0';
+      let scanCount = 0;
+      
+      do {
+        const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        
+        // Handle Redis v4 response format: [cursor, keys[]]
+        if (!reply || !Array.isArray(reply) || reply.length < 2) {
+          Logger.warn('Unexpected SCAN reply format', { reply, pattern });
+          break;
+        }
+        
+        cursor = reply[0];
+        const foundKeys = reply[1];
+        
+        // Ensure foundKeys is an array
+        if (Array.isArray(foundKeys)) {
+          keys.push(...foundKeys);
+          scanCount++;
+          Logger.debug('SCAN iteration', { 
+            cursor, 
+            keysFound: foundKeys.length, 
+            totalKeys: keys.length,
+            iteration: scanCount
+          });
+        } else {
+          Logger.warn('SCAN returned non-array keys', { foundKeys, reply, pattern });
+          break;
+        }
+      } while (cursor !== '0' && cursor !== 0);
+      
+      Logger.info('Found user subaccount cache keys to invalidate', { 
+        totalKeys: keys.length,
+        keys: keys.slice(0, 10) // Log first 10 keys for debugging
+      });
+      
+      // Delete all found keys in batches (Redis DEL can handle multiple keys)
+      if (keys.length > 0) {
+        // Delete in batches of 100 to avoid issues with very large key sets
+        const batchSize = 100;
+        let deletedCount = 0;
+        
+        for (let i = 0; i < keys.length; i += batchSize) {
+          const batch = keys.slice(i, i + batchSize);
+          const deleted = await this.client.del(batch);
+          deletedCount += deleted;
+          Logger.debug('Deleted batch of cache keys', { 
+            batchNumber: Math.floor(i / batchSize) + 1,
+            batchSize: batch.length,
+            deletedInBatch: deleted
+          });
+        }
+        
+        Logger.info('Invalidated all user subaccount caches', { 
+          keysFound: keys.length,
+          keysDeleted: deletedCount,
+          pattern 
+        });
+        
+        return deletedCount;
+      } else {
+        Logger.debug('No user subaccount cache keys found to invalidate', { pattern });
+        return 0;
+      }
+    } catch (error) {
+      Logger.error('Failed to invalidate all user subaccount caches', { 
+        error: error.message,
+        stack: error.stack,
+        pattern: 'user_subaccounts:*'
       });
       return null;
     }
@@ -292,9 +409,23 @@ class RedisService {
       
       do {
         const reply = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        
+        // Handle Redis v4 response format: [cursor, keys[]]
+        if (!reply || !Array.isArray(reply) || reply.length < 2) {
+          Logger.warn('Unexpected SCAN reply format in invalidateSubaccountUsers', { reply, pattern });
+          break;
+        }
+        
         cursor = reply[0];
-        keys.push(...reply[1]);
-      } while (cursor !== '0');
+        const foundKeys = reply[1];
+        
+        if (Array.isArray(foundKeys)) {
+          keys.push(...foundKeys);
+        } else {
+          Logger.warn('SCAN returned non-array keys in invalidateSubaccountUsers', { foundKeys, reply });
+          break;
+        }
+      } while (cursor !== '0' && cursor !== 0);
       
       // Delete all found keys
       if (keys.length > 0) {

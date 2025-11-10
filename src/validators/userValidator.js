@@ -16,7 +16,7 @@ const inviteUserSchema = Joi.object({
     .valid('viewer', 'editor', 'admin')
     .default('viewer')
     .messages({
-      'any.only': 'Role must be one of: viewer, editor, admin'
+      'any.only': 'Role must be one of: viewer, editor, admin. Owner role can only be assigned to the subaccount creator automatically.'
     }),
     
   permissions: Joi.object({

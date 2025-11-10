@@ -298,7 +298,9 @@ class UserController {
       if (!validRoles.includes(role)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid role specified',
+          message: role === 'owner' 
+            ? 'Owner role cannot be assigned through invitation. Owner role is automatically assigned to the subaccount creator only.'
+            : 'Invalid role specified. Role must be one of: viewer, editor, admin',
           code: 'INVALID_ROLE'
         });
       }

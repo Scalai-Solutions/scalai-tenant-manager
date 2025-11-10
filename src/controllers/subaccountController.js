@@ -4,6 +4,7 @@ const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
 const webhookService = require('../services/webhookService');
+const RetellSDK = require('retell-sdk').Retell;
 
 // Import models
 const Subaccount = require('../models/Subaccount');
@@ -11,6 +12,7 @@ const UserSubaccount = require('../models/UserSubaccount');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const Connector = require('../models/Connector');
+const RetellAccount = require('../models/RetellAccount');
 
 class SubaccountController {
   // Get user's subaccounts with caching
@@ -30,31 +32,6 @@ static async getUserSubaccounts(req, res, next) {
 
       // Check if user is a global admin or super_admin
       const isGlobalAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'super_admin');
-
-      // Get Redis service instance (dynamic)
-      const redisService = redisManager.getRedisService();
-
-      // Check cache first (if Redis is connected)
-      let cachedData = null;
-      const cacheKey = `user_subaccounts:${userId}:${isGlobalAdmin ? 'global_admin' : 'user'}:${JSON.stringify(req.query)}`;
-      
-      if (redisService && redisService.isConnected) {
-        try {
-          cachedData = await redisService.get(cacheKey);
-        } catch (error) {
-          Logger.warn('Cache get failed, continuing without cache', { error: error.message, cacheKey });
-        }
-      }
-      
-      if (cachedData) {
-        Logger.debug('Returning cached subaccounts', { userId, cacheKey });
-        return res.json({
-          success: true,
-          message: 'Subaccounts retrieved from cache',
-          data: cachedData,
-          cached: true
-        });
-      }
 
       // Get user subaccounts with pagination and timeout
       const skip = (page - 1) * limit;
@@ -212,15 +189,6 @@ static async getUserSubaccounts(req, res, next) {
               pages: Math.ceil(total / limit)
             }
           };
-        }
-
-        // Cache the result for 30 minutes (if Redis is connected)
-        if (redisService && redisService.isConnected) {
-          try {
-            await redisService.set(cacheKey, result, 1800);
-          } catch (error) {
-            Logger.warn('Cache set failed, continuing without caching', { error: error.message, cacheKey });
-          }
         }
 
         const duration = Date.now() - startTime;
@@ -661,19 +629,67 @@ static async getUserSubaccounts(req, res, next) {
         // Invalidate caches
         if (redisService && redisService.isConnected) {
           try {
-            // Invalidate user subaccounts cache
-            await redisService.invalidateUserSubaccounts(userId);
+            Logger.info('Starting cache invalidation after subaccount creation', {
+              userId,
+              subaccountId: subaccount._id.toString(),
+              redisConnected: redisService.isConnected
+            });
+            
+            // Invalidate ALL user subaccount caches (most aggressive approach)
+            // This ensures all users (including global admins) see the new subaccount immediately
+            const allKeysDeleted = await redisService.invalidateAllUserSubaccounts();
+            Logger.info('Invalidated all user subaccount caches', { 
+              keysDeleted: allKeysDeleted,
+              userId,
+              subaccountId: subaccount._id.toString()
+            });
+            
+            // Also invalidate the specific subaccount cache
+            const subaccountInvalidation = await redisService.invalidateSubaccount(subaccount._id.toString());
+            Logger.info('Invalidated subaccount cache', { 
+              subaccountId: subaccount._id.toString(), 
+              result: subaccountInvalidation,
+              userId
+            });
             
             // Invalidate subaccount users cache for the new subaccount
-            await redisService.invalidateSubaccountUsers(subaccount._id.toString());
+            const usersKeysDeleted = await redisService.invalidateSubaccountUsers(subaccount._id.toString());
+            Logger.info('Invalidated subaccount users cache', { 
+              subaccountId: subaccount._id.toString(), 
+              keysDeleted: usersKeysDeleted,
+              userId
+            });
             
-            Logger.debug('Caches invalidated after subaccount creation', {
+            // Also directly invalidate the creator's cache as a fallback
+            const creatorKeysDeleted = await redisService.invalidateUserSubaccounts(userId);
+            Logger.info('Invalidated creator cache as fallback', { 
               userId,
-              subaccountId: subaccount._id
+              keysDeleted: creatorKeysDeleted
+            });
+            
+            Logger.info('All caches invalidated after subaccount creation', {
+              userId,
+              subaccountId: subaccount._id.toString(),
+              allUserSubaccountKeysDeleted: allKeysDeleted,
+              subaccountKeysDeleted: subaccountInvalidation?.globalAdminKeys || 0,
+              usersKeysDeleted,
+              creatorKeysDeleted
             });
           } catch (cacheError) {
-            Logger.warn('Failed to invalidate cache', { error: cacheError.message });
+            Logger.error('Failed to invalidate cache', { 
+              error: cacheError.message,
+              stack: cacheError.stack,
+              userId,
+              subaccountId: subaccount._id.toString()
+            });
           }
+        } else {
+          Logger.warn('Redis not connected, skipping cache invalidation', {
+            hasRedisService: !!redisService,
+            isConnected: redisService ? redisService.isConnected : false,
+            userId,
+            subaccountId: subaccount._id.toString()
+          });
         }
 
         Logger.info('Subaccount created successfully', {
@@ -852,7 +868,7 @@ static async getUserSubaccounts(req, res, next) {
     }
   }
 
-  // Delete subaccount (soft delete)
+  // Delete subaccount (hard delete - removes from MongoDB)
   static async deleteSubaccount(req, res, next) {
     try {
       const { subaccountId } = req.params;
@@ -888,58 +904,307 @@ static async getUserSubaccounts(req, res, next) {
         }
       }
 
-      // Use transaction for atomic operation
-      await Database.withTransaction(async (session) => {
-        // Soft delete subaccount
-        await Subaccount.findByIdAndUpdate(
+      // Get subaccount with encrypted fields before deletion (needed for database deletion)
+      const subaccount = await Subaccount.findById(subaccountId)
+        .select('+mongodbUrl +encryptionIV +encryptionAuthTag databaseName');
+      
+      if (!subaccount) {
+        return res.status(404).json({
+          success: false,
+          message: 'Subaccount not found',
+          code: 'SUBACCOUNT_NOT_FOUND'
+        });
+      }
+
+      // Delete the MongoDB database associated with this subaccount
+      let dbConnection = null;
+      try {
+        const decryptedUrl = subaccount.getDecryptedUrl();
+        const databaseName = subaccount.databaseName;
+        
+        Logger.info('Deleting MongoDB database for subaccount', {
           subaccountId,
-          { 
-            isActive: false,
-            updatedAt: new Date()
-          },
-          { session }
-        );
+          databaseName,
+          maskedUrl: SubaccountController.maskConnectionString(decryptedUrl)
+        });
 
-        // Deactivate all user-subaccount relationships
-        await UserSubaccount.updateMany(
-          { subaccountId },
-          { 
-            isActive: false,
-            updatedAt: new Date()
-          },
-          { session }
-        );
+        // Create a connection to the subaccount's MongoDB instance
+        // Ensure we connect to the specific database by including it in the connection options
+        dbConnection = await mongoose.createConnection(decryptedUrl, {
+          dbName: databaseName, // Explicitly specify the database name
+          serverSelectionTimeoutMS: 10000,
+          connectTimeoutMS: 10000,
+          maxPoolSize: 1,
+          minPoolSize: 0
+        });
 
-        // Update user subaccount count
-        const userCount = await UserSubaccount.countDocuments({
-          userId,
-          isActive: true
+        // Wait for connection to be ready
+        await new Promise((resolve, reject) => {
+          dbConnection.once('connected', resolve);
+          dbConnection.once('error', reject);
+          setTimeout(() => reject(new Error('Connection timeout')), 10000);
+        });
+
+        // Drop the database
+        // This will drop the database that the connection is currently using
+        const db = dbConnection.db;
+        await db.dropDatabase();
+        
+        Logger.debug('Database drop command executed', {
+          subaccountId,
+          databaseName,
+          dbName: db.databaseName
         });
         
-        await User.findByIdAndUpdate(
-          userId,
-          { subaccountCount: userCount },
-          { session }
-        );
+        Logger.info('MongoDB database deleted successfully', {
+          subaccountId,
+          databaseName
+        });
+      } catch (dbError) {
+        Logger.error('Failed to delete MongoDB database', {
+          error: dbError.message,
+          stack: dbError.stack,
+          subaccountId,
+          databaseName: subaccount.databaseName
+        });
+        // Continue with subaccount deletion even if database deletion fails
+      } finally {
+        // Close the database connection
+        if (dbConnection) {
+          try {
+            await dbConnection.close();
+          } catch (closeError) {
+            Logger.warn('Error closing database connection', {
+              error: closeError.message,
+              subaccountId
+            });
+          }
+        }
+      }
+
+      // Delete Retell resources (agents, phone numbers, knowledge bases) but keep RetellAccount
+      try {
+        const retellAccount = await RetellAccount.findOne({ subaccountId })
+          .select('+apiKey +encryptionIV +encryptionAuthTag');
+        
+        if (retellAccount && retellAccount.isActive) {
+          Logger.info('Deleting Retell resources for subaccount', {
+            subaccountId,
+            retellAccountId: retellAccount._id
+          });
+
+          // Decrypt API key
+          const decryptedApiKey = retellAccount.getDecryptedApiKey();
+          
+          // Create Retell SDK client
+          const retellClient = new RetellSDK({
+            apiKey: decryptedApiKey
+          });
+
+          // Delete all agents
+          try {
+            const agents = await retellClient.agent.list();
+            Logger.info('Found agents to delete', {
+              subaccountId,
+              agentCount: agents?.length || 0
+            });
+            
+            for (const agent of agents || []) {
+              try {
+                await retellClient.agent.delete(agent.agent_id);
+                Logger.debug('Deleted agent from Retell', {
+                  subaccountId,
+                  agentId: agent.agent_id,
+                  agentName: agent.agent_name
+                });
+              } catch (agentError) {
+                Logger.warn('Failed to delete agent from Retell', {
+                  subaccountId,
+                  agentId: agent.agent_id,
+                  error: agentError.message
+                });
+              }
+            }
+          } catch (agentsError) {
+            Logger.warn('Failed to list/delete agents from Retell', {
+              subaccountId,
+              error: agentsError.message
+            });
+          }
+
+          // Delete all phone numbers
+          try {
+            const phoneNumbers = await retellClient.phoneNumber.list();
+            Logger.info('Found phone numbers to delete', {
+              subaccountId,
+              phoneNumberCount: phoneNumbers?.length || 0
+            });
+            
+            for (const phoneNumber of phoneNumbers || []) {
+              try {
+                await retellClient.phoneNumber.delete(phoneNumber.phone_number_id);
+                Logger.debug('Deleted phone number from Retell', {
+                  subaccountId,
+                  phoneNumberId: phoneNumber.phone_number_id,
+                  phoneNumber: phoneNumber.phone_number
+                });
+              } catch (phoneError) {
+                Logger.warn('Failed to delete phone number from Retell', {
+                  subaccountId,
+                  phoneNumberId: phoneNumber.phone_number_id,
+                  error: phoneError.message
+                });
+              }
+            }
+          } catch (phoneNumbersError) {
+            Logger.warn('Failed to list/delete phone numbers from Retell', {
+              subaccountId,
+              error: phoneNumbersError.message
+            });
+          }
+
+          // Delete all knowledge bases
+          try {
+            const knowledgeBases = await retellClient.knowledgeBase.list();
+            Logger.info('Found knowledge bases to delete', {
+              subaccountId,
+              knowledgeBaseCount: knowledgeBases?.length || 0
+            });
+            
+            for (const kb of knowledgeBases || []) {
+              try {
+                await retellClient.knowledgeBase.delete(kb.knowledge_base_id);
+                Logger.debug('Deleted knowledge base from Retell', {
+                  subaccountId,
+                  knowledgeBaseId: kb.knowledge_base_id,
+                  knowledgeBaseName: kb.knowledge_base_name
+                });
+              } catch (kbError) {
+                Logger.warn('Failed to delete knowledge base from Retell', {
+                  subaccountId,
+                  knowledgeBaseId: kb.knowledge_base_id,
+                  error: kbError.message
+                });
+              }
+            }
+          } catch (kbError) {
+            Logger.warn('Failed to list/delete knowledge bases from Retell', {
+              subaccountId,
+              error: kbError.message
+            });
+          }
+
+          // Delete all call logs
+          try {
+            // List all calls with maximum limit (Retell API supports up to 1000 per request)
+            const calls = await retellClient.call.list({ limit: 1000 });
+            const callList = Array.isArray(calls) ? calls : [];
+            
+            Logger.info('Found call logs to delete', {
+              subaccountId,
+              callCount: callList.length
+            });
+            
+            // Delete each call log
+            for (const call of callList) {
+              try {
+                await retellClient.call.delete(call.call_id);
+                Logger.debug('Deleted call log from Retell', {
+                  subaccountId,
+                  callId: call.call_id,
+                  agentId: call.agent_id
+                });
+              } catch (callError) {
+                Logger.warn('Failed to delete call log from Retell', {
+                  subaccountId,
+                  callId: call.call_id,
+                  error: callError.message
+                });
+              }
+            }
+            
+            // Note: If there are more than 1000 calls, we'd need pagination
+            // For now, this handles the common case. If needed, pagination can be added later.
+            if (callList.length === 1000) {
+              Logger.warn('Reached call log limit (1000), there may be more calls to delete', {
+                subaccountId
+              });
+            }
+          } catch (callsError) {
+            Logger.warn('Failed to list/delete call logs from Retell', {
+              subaccountId,
+              error: callsError.message
+            });
+          }
+
+          Logger.info('Retell resources deletion completed', {
+            subaccountId,
+            retellAccountId: retellAccount._id
+          });
+        } else {
+          Logger.debug('No active RetellAccount found, skipping Retell resource deletion', {
+            subaccountId,
+            hasRetellAccount: !!retellAccount,
+            isActive: retellAccount?.isActive
+          });
+        }
+      } catch (retellError) {
+        Logger.error('Failed to delete Retell resources', {
+          error: retellError.message,
+          stack: retellError.stack,
+          subaccountId
+        });
+        // Continue with subaccount deletion even if Retell deletion fails
+      }
+
+      // Use transaction for atomic operation
+      let affectedUserIds = [];
+      await Database.withTransaction(async (session) => {
+        // Get all users associated with this subaccount before deletion (for updating counts)
+        const allUserSubaccounts = await UserSubaccount.find({ subaccountId }).session(session);
+        affectedUserIds = [...new Set(allUserSubaccounts.map(us => us.userId.toString()))];
+
+        // Note: RetellAccount is NOT deleted - it's kept for potential reuse
+
+        // Hard delete all user-subaccount relationships
+        await UserSubaccount.deleteMany({ subaccountId }).session(session);
+
+        // Hard delete subaccount
+        await Subaccount.findByIdAndDelete(subaccountId).session(session);
+
+        // Update subaccount count for all affected users
+        for (const affectedUserId of affectedUserIds) {
+          const activeSubaccountCount = await UserSubaccount.countDocuments({
+            userId: affectedUserId,
+            isActive: true
+          }).session(session);
+          
+          await User.findByIdAndUpdate(
+            affectedUserId,
+            { subaccountCount: activeSubaccountCount }
+          ).session(session);
+        }
       });
 
       // Invalidate all related caches
       if (redisService && redisService.isConnected) {
         try {
+          // Invalidate caches for all affected users
           await Promise.all([
             redisService.invalidateSubaccount(subaccountId),
             redisService.invalidateSubaccountUsers(subaccountId),
-            redisService.invalidateUserSubaccounts(userId)
+            ...affectedUserIds.map(userId => redisService.invalidateUserSubaccounts(userId))
           ]);
         } catch (cacheError) {
           Logger.warn('Failed to invalidate cache', { error: cacheError.message });
         }
       }
 
-      Logger.security('Subaccount deleted', 'medium', {
+      Logger.security('Subaccount deleted', 'high', {
         userId,
         subaccountId,
-        action: 'delete'
+        action: 'hard_delete',
+        affectedUsers: affectedUserIds.length
       });
 
       res.json({
