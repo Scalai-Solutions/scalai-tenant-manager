@@ -692,6 +692,69 @@ static async getUserSubaccounts(req, res, next) {
           });
         }
 
+        // Create default calendar for the new subaccount
+        try {
+          const subaccountIdStr = result.subaccount._id.toString();
+          
+          // Check if webhook server is configured
+          if (!webhookService.serviceToken) {
+            Logger.warn('Webhook server service token not configured - skipping calendar creation', {
+              subaccountId: subaccountIdStr,
+              webhookServerUrl: webhookService.baseURL
+            });
+          } else {
+            Logger.info('Creating default calendar for new subaccount', {
+              subaccountId: subaccountIdStr,
+              webhookServerUrl: webhookService.baseURL
+            });
+            
+            const calendarResponse = await webhookService.client.post(
+              `/api/calendar/${subaccountIdStr}/default`,
+              {},
+              {
+                headers: {
+                  'X-Service-Token': webhookService.serviceToken,
+                  'X-Service-Name': config.server.serviceName
+                },
+                timeout: 10000
+              }
+            );
+            
+            if (calendarResponse.data.success) {
+              Logger.info('Default calendar created successfully', {
+                subaccountId: subaccountIdStr,
+                calendarId: calendarResponse.data.calendar?._id,
+                calendarUserEmail: calendarResponse.data.calendar?.userEmail
+              });
+            } else {
+              Logger.warn('Failed to create default calendar', {
+                subaccountId: subaccountIdStr,
+                message: calendarResponse.data.message,
+                response: calendarResponse.data
+              });
+            }
+          }
+        } catch (calendarError) {
+          // Don't fail subaccount creation if calendar creation fails
+          // But log it prominently so it can be debugged
+          Logger.error('Error creating default calendar (non-critical)', {
+            subaccountId: result.subaccount._id.toString(),
+            error: calendarError.message,
+            errorCode: calendarError.code,
+            status: calendarError.response?.status,
+            statusText: calendarError.response?.statusText,
+            responseData: calendarError.response?.data,
+            webhookServerUrl: webhookService.baseURL,
+            hasServiceToken: !!webhookService.serviceToken,
+            stack: calendarError.stack
+          });
+          
+          // Log a warning that calendar will be created on first query
+          Logger.warn('Calendar will be created automatically when first queried', {
+            subaccountId: result.subaccount._id.toString()
+          });
+        }
+
         Logger.info('Subaccount created successfully', {
           userId,
           subaccountId: result.subaccount._id,
