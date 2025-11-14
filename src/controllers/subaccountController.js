@@ -578,7 +578,7 @@ static async getUserSubaccounts(req, res, next) {
 
       // Create subaccount (simplified without transaction for now)
       try {
-        // Create subaccount
+        // Create subaccount first (without retellAccountId initially)
         const subaccount = new Subaccount({
           name,
           description,
@@ -597,6 +597,59 @@ static async getUserSubaccounts(req, res, next) {
 
         await subaccount.save();
         console.log('[DEBUG] Subaccount saved with ID:', subaccount._id);
+
+        // Create a new RetellAccount for this subaccount with same API key as first RetellAccount
+        let retellAccountId = null;
+        try {
+          // Find the first RetellAccount to get its API key configuration
+          const firstRetellAccount = await RetellAccount.findOne({})
+            .select('+apiKey +encryptionIV +encryptionAuthTag')
+            .sort({ createdAt: 1 }); // Get the first created one
+
+          if (firstRetellAccount) {
+            // Get the decrypted API key from the first RetellAccount
+            const decryptedApiKey = firstRetellAccount.getDecryptedApiKey();
+            
+            // Create a new RetellAccount with the same API key but linked to the new subaccount
+            const newRetellAccount = new RetellAccount({
+              apiKey: decryptedApiKey, // Will be encrypted by pre-save middleware
+              accountName: firstRetellAccount.accountName || `${name} Retell Account`,
+              subaccountId: subaccount._id,
+              createdBy: userId,
+              isActive: firstRetellAccount.isActive !== undefined ? firstRetellAccount.isActive : true,
+              verificationStatus: firstRetellAccount.verificationStatus || 'pending'
+            });
+
+            await newRetellAccount.save();
+            retellAccountId = newRetellAccount._id;
+
+            // Update subaccount with the new retellAccountId
+            subaccount.retellAccountId = retellAccountId;
+            await subaccount.save();
+
+            Logger.info('Created new RetellAccount for subaccount', {
+              userId,
+              name,
+              subaccountId: subaccount._id.toString(),
+              retellAccountId: retellAccountId.toString()
+            });
+          } else {
+            Logger.warn('No RetellAccount found in database. New subaccount will be created without retellAccountId link.', {
+              userId,
+              name,
+              subaccountId: subaccount._id.toString()
+            });
+          }
+        } catch (retellError) {
+          Logger.error('Error creating RetellAccount for new subaccount', {
+            error: retellError.message,
+            stack: retellError.stack,
+            userId,
+            name,
+            subaccountId: subaccount._id.toString()
+          });
+          // Continue without retellAccountId - don't fail subaccount creation
+        }
 
         // Create user-subaccount relationship with owner permissions
         const userSubaccount = new UserSubaccount({
