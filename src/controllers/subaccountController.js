@@ -4,6 +4,7 @@ const Logger = require('../utils/logger');
 const redisManager = require('../services/redisManager');
 const Database = require('../utils/database');
 const webhookService = require('../services/webhookService');
+const databaseService = require('../services/databaseService');
 const RetellSDK = require('retell-sdk').Retell;
 
 // Import models
@@ -808,6 +809,64 @@ static async getUserSubaccounts(req, res, next) {
           });
         }
 
+        // Configure Twilio regulatory bundle for GB phone numbers
+        try {
+          const subaccountIdStr = result.subaccount._id.toString();
+          const bundleSid = config.twilio.defaultBundleSid;
+          
+          if (!bundleSid) {
+            Logger.warn('No default Twilio bundle SID configured - skipping bundle configuration', {
+              subaccountId: subaccountIdStr
+            });
+          } else if (!databaseService.serviceToken) {
+            Logger.warn('Database server service token not configured - skipping bundle configuration', {
+              subaccountId: subaccountIdStr,
+              databaseServerUrl: databaseService.baseURL
+            });
+          } else {
+            Logger.info('Configuring Twilio regulatory bundle for new subaccount', {
+              subaccountId: subaccountIdStr,
+              bundleSid,
+              databaseServerUrl: databaseService.baseURL
+            });
+            
+            const bundleResponse = await databaseService.configureTwilioBundle(subaccountIdStr, bundleSid);
+            
+            if (bundleResponse.success) {
+              Logger.info('Twilio bundle configured successfully', {
+                subaccountId: subaccountIdStr,
+                bundleSid
+              });
+            } else {
+              Logger.warn('Failed to configure Twilio bundle', {
+                subaccountId: subaccountIdStr,
+                bundleSid,
+                message: bundleResponse.message
+              });
+            }
+          }
+        } catch (bundleError) {
+          // Don't fail subaccount creation if bundle configuration fails
+          // But log it prominently so it can be debugged
+          Logger.error('Error configuring Twilio bundle (non-critical)', {
+            subaccountId: result.subaccount._id.toString(),
+            error: bundleError.message,
+            errorCode: bundleError.code,
+            status: bundleError.response?.status,
+            statusText: bundleError.response?.statusText,
+            responseData: bundleError.response?.data,
+            databaseServerUrl: databaseService.baseURL,
+            hasServiceToken: !!databaseService.serviceToken,
+            stack: bundleError.stack
+          });
+          
+          // Log a warning that bundle can be configured manually later
+          Logger.warn('Twilio bundle can be configured manually later using the connector API', {
+            subaccountId: result.subaccount._id.toString(),
+            bundleSid: config.twilio.defaultBundleSid
+          });
+        }
+
         Logger.info('Subaccount created successfully', {
           userId,
           subaccountId: result.subaccount._id,
@@ -1148,32 +1207,67 @@ static async getUserSubaccounts(req, res, next) {
             });
           }
 
-          // Delete all phone numbers
+          // Delete all phone numbers from all systems (Retell, Twilio, MongoDB)
           try {
             const phoneNumbers = await retellClient.phoneNumber.list();
-            Logger.info('Found phone numbers to delete', {
+            Logger.info('Found phone numbers to delete from all systems', {
               subaccountId,
               phoneNumberCount: phoneNumbers?.length || 0
             });
             
+            // Use comprehensive deletion via database service
             for (const phoneNumber of phoneNumbers || []) {
               try {
-                await retellClient.phoneNumber.delete(phoneNumber.phone_number_id);
-                Logger.debug('Deleted phone number from Retell', {
-                  subaccountId,
-                  phoneNumberId: phoneNumber.phone_number_id,
-                  phoneNumber: phoneNumber.phone_number
-                });
+                // Call database service to delete from Retell, Twilio, and MongoDB
+                const deleteResult = await databaseService.client.delete(
+                  `/api/connectors/${subaccountId}/phone-numbers/${encodeURIComponent(phoneNumber.phone_number)}`,
+                  {
+                    headers: {
+                      'X-Service-Token': databaseService.serviceToken,
+                      'X-Service-Name': config.server.serviceName
+                    }
+                  }
+                );
+                
+                if (deleteResult.data.success) {
+                  Logger.info('Deleted phone number from all systems', {
+                    subaccountId,
+                    phoneNumber: phoneNumber.phone_number,
+                    deletionResults: deleteResult.data.data.results
+                  });
+                } else {
+                  Logger.warn('Phone number deletion completed with partial failures', {
+                    subaccountId,
+                    phoneNumber: phoneNumber.phone_number,
+                    deletionResults: deleteResult.data.data.results
+                  });
+                }
               } catch (phoneError) {
-                Logger.warn('Failed to delete phone number from Retell', {
+                Logger.warn('Failed to delete phone number from all systems', {
                   subaccountId,
-                  phoneNumberId: phoneNumber.phone_number_id,
-                  error: phoneError.message
+                  phoneNumber: phoneNumber.phone_number,
+                  error: phoneError.message,
+                  response: phoneError.response?.data
                 });
+                
+                // Fallback: Try to delete just from Retell if comprehensive deletion fails
+                try {
+                  await retellClient.phoneNumber.delete(phoneNumber.phone_number_id);
+                  Logger.info('Fallback: Deleted phone number from Retell only', {
+                    subaccountId,
+                    phoneNumber: phoneNumber.phone_number
+                  });
+                } catch (fallbackError) {
+                  Logger.error('Fallback deletion also failed', {
+                    subaccountId,
+                    phoneNumber: phoneNumber.phone_number,
+                    error: fallbackError.message
+                  });
+                }
               }
             }
           } catch (phoneNumbersError) {
-            Logger.warn('Failed to list/delete phone numbers from Retell', {
+            Logger.warn('Failed to list/delete phone numbers', {
               subaccountId,
               error: phoneNumbersError.message
             });

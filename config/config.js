@@ -60,6 +60,12 @@ const config = {
     timeout: 10000
   },
   
+  // Twilio configuration for automatic setup
+  twilio: {
+    // Default GB regulatory bundle SID to be configured for all new subaccounts
+    defaultBundleSid: process.env.TWILIO_DEFAULT_BUNDLE_SID || 'BU3d5be36ba71da67b804b80c766250783'
+  },
+  
   cors: {
     origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
     credentials: true
