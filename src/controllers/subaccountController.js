@@ -1207,20 +1207,127 @@ static async getUserSubaccounts(req, res, next) {
             });
           }
 
-          // Delete all phone numbers from all systems (Retell, Twilio, MongoDB)
+          // STEP 1: Delete Twilio trunk FIRST (records phone numbers attached to it)
+          let phoneNumbersToRelease = [];
+          try {
+            Logger.info('Deleting Twilio trunk for subaccount', {
+              subaccountId
+            });
+            
+            const trunkDeletionResult = await databaseService.client.delete(
+              `/api/connectors/${subaccountId}/twilio-trunk`,
+              {
+                headers: {
+                  'X-Service-Token': databaseService.serviceToken,
+                  'X-Service-Name': config.server.serviceName
+                }
+              }
+            );
+            
+            if (trunkDeletionResult.data.success) {
+              phoneNumbersToRelease = trunkDeletionResult.data.data?.phoneNumbersToRelease || [];
+              Logger.info('Twilio trunk deleted successfully', {
+                subaccountId,
+                trunkSid: trunkDeletionResult.data.data?.trunkSid,
+                trunkDeleted: trunkDeletionResult.data.data?.trunkDeleted,
+                skipped: trunkDeletionResult.data.data?.skipped,
+                phoneNumbersRecorded: phoneNumbersToRelease.length,
+                phoneNumbers: phoneNumbersToRelease.map(n => n.phoneNumber)
+              });
+            } else {
+              Logger.warn('Twilio trunk deletion failed', {
+                subaccountId,
+                error: trunkDeletionResult.data.error,
+                message: trunkDeletionResult.data.message
+              });
+            }
+          } catch (trunkError) {
+            Logger.error('Failed to delete Twilio trunk', {
+              subaccountId,
+              error: trunkError.message,
+              response: trunkError.response?.data
+            });
+            // Continue with subaccount deletion even if trunk deletion fails
+          }
+
+          // STEP 2: Release phone numbers from Twilio (that were attached to the trunk)
+          if (phoneNumbersToRelease.length > 0) {
+            try {
+              Logger.info('Releasing phone numbers from Twilio', {
+                subaccountId,
+                phoneNumberCount: phoneNumbersToRelease.length,
+                phoneNumbers: phoneNumbersToRelease.map(n => n.phoneNumber)
+              });
+              
+              const releaseResult = await databaseService.client.post(
+                `/api/connectors/${subaccountId}/twilio/release-phone-numbers`,
+                { phoneNumbersToRelease },
+                {
+                  headers: {
+                    'X-Service-Token': databaseService.serviceToken,
+                    'X-Service-Name': config.server.serviceName
+                  }
+                }
+              );
+              
+              if (releaseResult.data.success) {
+                Logger.info('Phone numbers released from Twilio', {
+                  subaccountId,
+                  phoneNumbersReleased: releaseResult.data.data?.phoneNumbersReleased?.length || 0,
+                  phoneNumbersFailed: releaseResult.data.data?.phoneNumbersFailed?.length || 0,
+                  releasedNumbers: releaseResult.data.data?.phoneNumbersReleased || []
+                });
+              } else {
+                Logger.warn('Phone number release failed', {
+                  subaccountId,
+                  error: releaseResult.data.error,
+                  message: releaseResult.data.message
+                });
+              }
+            } catch (releaseError) {
+              Logger.error('Failed to release phone numbers from Twilio', {
+                subaccountId,
+                error: releaseError.message,
+                response: releaseError.response?.data
+              });
+              // Continue with subaccount deletion even if release fails
+            }
+          } else {
+            Logger.info('No phone numbers to release from Twilio', {
+              subaccountId
+            });
+          }
+
+          // STEP 3: Delete phone numbers from Retell and MongoDB
           try {
             const phoneNumbers = await retellClient.phoneNumber.list();
-            Logger.info('Found phone numbers to delete from all systems', {
+            Logger.info('Found phone numbers to delete from Retell and MongoDB', {
               subaccountId,
               phoneNumberCount: phoneNumbers?.length || 0
             });
             
-            // Use comprehensive deletion via database service
+            // Delete from Retell
             for (const phoneNumber of phoneNumbers || []) {
               try {
-                // Call database service to delete from Retell, Twilio, and MongoDB
+                await retellClient.phoneNumber.delete(phoneNumber.phone_number_id);
+                Logger.info('Deleted phone number from Retell', {
+                  subaccountId,
+                  phoneNumber: phoneNumber.phone_number
+                });
+              } catch (phoneError) {
+                Logger.warn('Failed to delete phone number from Retell', {
+                  subaccountId,
+                  phoneNumber: phoneNumber.phone_number,
+                  error: phoneError.message
+                });
+              }
+            }
+
+            // Clean up phone numbers from MongoDB (via database service)
+            for (const phoneNumber of phoneNumbers || []) {
+              try {
                 const deleteResult = await databaseService.client.delete(
-                  `/api/connectors/${subaccountId}/phone-numbers/${encodeURIComponent(phoneNumber.phone_number)}`,
+                  `/api/connectors/${subaccountId}/phone-numbers/${encodeURIComponent(phoneNumber.phone_number)}/mongodb`,
                   {
                     headers: {
                       'X-Service-Token': databaseService.serviceToken,
@@ -1230,44 +1337,26 @@ static async getUserSubaccounts(req, res, next) {
                 );
                 
                 if (deleteResult.data.success) {
-                  Logger.info('Deleted phone number from all systems', {
-                    subaccountId,
-                    phoneNumber: phoneNumber.phone_number,
-                    deletionResults: deleteResult.data.data.results
-                  });
-                } else {
-                  Logger.warn('Phone number deletion completed with partial failures', {
-                    subaccountId,
-                    phoneNumber: phoneNumber.phone_number,
-                    deletionResults: deleteResult.data.data.results
-                  });
-                }
-              } catch (phoneError) {
-                Logger.warn('Failed to delete phone number from all systems', {
-                  subaccountId,
-                  phoneNumber: phoneNumber.phone_number,
-                  error: phoneError.message,
-                  response: phoneError.response?.data
-                });
-                
-                // Fallback: Try to delete just from Retell if comprehensive deletion fails
-                try {
-                  await retellClient.phoneNumber.delete(phoneNumber.phone_number_id);
-                  Logger.info('Fallback: Deleted phone number from Retell only', {
+                  Logger.info('Deleted phone number from MongoDB', {
                     subaccountId,
                     phoneNumber: phoneNumber.phone_number
                   });
-                } catch (fallbackError) {
-                  Logger.error('Fallback deletion also failed', {
+                } else {
+                  Logger.warn('Failed to delete phone number from MongoDB', {
                     subaccountId,
-                    phoneNumber: phoneNumber.phone_number,
-                    error: fallbackError.message
+                    phoneNumber: phoneNumber.phone_number
                   });
                 }
+              } catch (dbError) {
+                Logger.warn('Failed to delete phone number from MongoDB', {
+                  subaccountId,
+                  phoneNumber: phoneNumber.phone_number,
+                  error: dbError.message
+                });
               }
             }
           } catch (phoneNumbersError) {
-            Logger.warn('Failed to list/delete phone numbers', {
+            Logger.warn('Failed to list/delete phone numbers from Retell and MongoDB', {
               subaccountId,
               error: phoneNumbersError.message
             });
