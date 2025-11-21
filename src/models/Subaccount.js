@@ -50,6 +50,21 @@ const subaccountSchema = new mongoose.Schema({
     default: true
   },
   
+  // Timezone for this tenant (defaults to UTC)
+  timezone: {
+    type: String,
+    default: 'UTC',
+    trim: true,
+    validate: {
+      validator: function(v) {
+        // Basic validation - just check if it's a non-empty string
+        // More comprehensive validation can be added with moment-timezone
+        return v && typeof v === 'string' && v.length > 0;
+      },
+      message: 'Timezone must be a valid timezone string (e.g., "America/New_York", "UTC")'
+    }
+  },
+  
   // Connection pool settings
   maxConnections: {
     type: Number,

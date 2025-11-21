@@ -89,6 +89,7 @@ static async getUserSubaccounts(req, res, next) {
               description: subaccount.description,
               isActive: subaccount.isActive,
               maintenanceMode: subaccount.maintenanceMode,
+              timezone: subaccount.timezone,
               role: 'admin', // Global admins have admin role on all subaccounts
               permissions: {
                 read: true,
@@ -167,6 +168,7 @@ static async getUserSubaccounts(req, res, next) {
               description: us.subaccountId.description,
               isActive: us.subaccountId.isActive,
               maintenanceMode: us.subaccountId.maintenanceMode,
+              timezone: us.subaccountId.timezone,
               role: us.role,
               permissions: us.permissions,
               stats: us.subaccountId.stats,
@@ -364,6 +366,7 @@ static async getUserSubaccounts(req, res, next) {
         isActive: subaccount.isActive,
         maintenanceMode: subaccount.maintenanceMode,
         maintenanceMessage: subaccount.maintenanceMessage,
+        timezone: subaccount.timezone,
         maxConnections: subaccount.maxConnections,
         enforceSchema: subaccount.enforceSchema,
         allowedCollections: subaccount.allowedCollections,
@@ -474,7 +477,8 @@ static async getUserSubaccounts(req, res, next) {
         maxConnections = 5,
         enforceSchema = true,
         allowedCollections = [],
-        rateLimits = {}
+        rateLimits = {},
+        timezone = 'UTC'
       } = req.body;
 
       Logger.audit('Create subaccount', 'subaccount', {
@@ -585,6 +589,7 @@ static async getUserSubaccounts(req, res, next) {
           description,
           mongodbUrl: finalMongodbUrl, // Will be encrypted by pre-save middleware
           databaseName,
+          timezone: timezone || 'UTC',
           maxConnections: Math.min(maxConnections, 20), // Cap at 20
           enforceSchema,
           allowedCollections,
@@ -881,6 +886,7 @@ static async getUserSubaccounts(req, res, next) {
           name: result.subaccount.name,
           description: result.subaccount.description,
           databaseName: result.subaccount.databaseName,
+          timezone: result.subaccount.timezone,
           isActive: result.subaccount.isActive,
           maxConnections: result.subaccount.maxConnections,
           enforceSchema: result.subaccount.enforceSchema,
@@ -970,7 +976,7 @@ static async getUserSubaccounts(req, res, next) {
       // Filter allowed updates
       const allowedUpdates = [
         'name', 'description', 'maxConnections', 'enforceSchema',
-        'allowedCollections', 'rateLimits', 'maintenanceMode', 'maintenanceMessage'
+        'allowedCollections', 'rateLimits', 'maintenanceMode', 'maintenanceMessage', 'timezone'
       ];
       
       const filteredUpdates = {};
@@ -1298,10 +1304,11 @@ static async getUserSubaccounts(req, res, next) {
             });
           }
 
-          // STEP 3: Delete phone numbers from Retell and MongoDB
+          // STEP 3: Delete phone numbers from Retell
+          // Note: MongoDB cleanup is not needed as the database was already dropped
           try {
             const phoneNumbers = await retellClient.phoneNumber.list();
-            Logger.info('Found phone numbers to delete from Retell and MongoDB', {
+            Logger.info('Found phone numbers to delete from Retell', {
               subaccountId,
               phoneNumberCount: phoneNumbers?.length || 0
             });
@@ -1322,41 +1329,8 @@ static async getUserSubaccounts(req, res, next) {
                 });
               }
             }
-
-            // Clean up phone numbers from MongoDB (via database service)
-            for (const phoneNumber of phoneNumbers || []) {
-              try {
-                const deleteResult = await databaseService.client.delete(
-                  `/api/connectors/${subaccountId}/phone-numbers/${encodeURIComponent(phoneNumber.phone_number)}/mongodb`,
-                  {
-                    headers: {
-                      'X-Service-Token': databaseService.serviceToken,
-                      'X-Service-Name': config.server.serviceName
-                    }
-                  }
-                );
-                
-                if (deleteResult.data.success) {
-                  Logger.info('Deleted phone number from MongoDB', {
-                    subaccountId,
-                    phoneNumber: phoneNumber.phone_number
-                  });
-                } else {
-                  Logger.warn('Failed to delete phone number from MongoDB', {
-                    subaccountId,
-                    phoneNumber: phoneNumber.phone_number
-                  });
-                }
-              } catch (dbError) {
-                Logger.warn('Failed to delete phone number from MongoDB', {
-                  subaccountId,
-                  phoneNumber: phoneNumber.phone_number,
-                  error: dbError.message
-                });
-              }
-            }
           } catch (phoneNumbersError) {
-            Logger.warn('Failed to list/delete phone numbers from Retell and MongoDB', {
+            Logger.warn('Failed to list/delete phone numbers from Retell', {
               subaccountId,
               error: phoneNumbersError.message
             });

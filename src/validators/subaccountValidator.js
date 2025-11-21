@@ -132,7 +132,15 @@ const createSubaccountSchema = Joi.object({
       .min(1)
       .max(100000)
       .default(10000)
-  }).default()
+  }).default(),
+  
+  timezone: Joi.string()
+    .trim()
+    .default('UTC')
+    .messages({
+      'string.base': 'Timezone must be a valid IANA timezone string (e.g., "America/New_York", "Europe/Madrid")',
+      'string.empty': 'Timezone cannot be empty'
+    })
 });
 
 const updateSubaccountSchema = Joi.object({
@@ -217,6 +225,13 @@ const updateSubaccountSchema = Joi.object({
     .allow('')
     .messages({
       'string.max': 'Maintenance message cannot exceed 500 characters'
+    }),
+  
+  timezone: Joi.string()
+    .trim()
+    .messages({
+      'string.base': 'Timezone must be a valid IANA timezone string (e.g., "America/New_York", "Europe/Madrid")',
+      'string.empty': 'Timezone cannot be empty'
     })
 }).min(1).messages({
   'object.min': 'At least one field must be provided for update'
