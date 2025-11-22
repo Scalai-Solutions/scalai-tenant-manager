@@ -50,10 +50,10 @@ const subaccountSchema = new mongoose.Schema({
     default: true
   },
   
-  // Timezone for this tenant (defaults to UTC)
+  // Timezone for this tenant (defaults to Europe/Madrid)
   timezone: {
     type: String,
-    default: 'UTC',
+    default: 'Europe/Madrid',
     trim: true,
     validate: {
       validator: function(v) {
